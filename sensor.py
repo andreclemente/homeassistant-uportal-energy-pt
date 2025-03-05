@@ -49,7 +49,7 @@ class UportalEnergyPtApiClient:
         self.last_update = None
         self.auth_data = {
             "token": config_entry.data.get("token"),
-            "expiry": config_entry.data.get("expiry")
+            "expiry": config_entry.data.get("expiry", 0)
         }
 
     async def async_initialize(self):
@@ -75,7 +75,7 @@ class UportalEnergyPtApiClient:
                 
                 self.auth_data.update({
                     "token": data.get("token", {}).get("token"),
-                    "expiry": data.get("token", {}).get("expirationDate")
+                    "expiry": data.get("token", {}).get("expirationDate", 0)
                 })
                 _LOGGER.info("Token refreshed successfully")
 
@@ -87,6 +87,100 @@ class UportalEnergyPtApiClient:
             self.auth_data["token"] = None
             _LOGGER.error("Token refresh error: %s", str(e))
             raise
+
+    async def async_update_data(self, counter):
+        """Update sensor data with enhanced error handling."""
+        retries = 3
+        for attempt in range(retries):
+            try:
+                if not self.auth_data.get("token"):
+                    await self.async_refresh_token()
+
+                counter_num = counter.get("numeroContador")
+                if not counter_num:
+                    _LOGGER.error("Missing counter number in request")
+                    return
+
+                params = {
+                    "codigoMarca": counter.get("codigoMarca"),
+                    "codigoProduto": counter.get("codigoProduto"),
+                    "dataFim": datetime.now().strftime("%Y-%m-%d"),
+                    "dataInicio": (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
+                    "numeroContador": counter_num,
+                    "subscriptionId": self.config_entry.data.get("subscription_id")
+                }
+                
+                _LOGGER.debug("Requesting data with params: %s", params)
+                
+                async with self.session.get(
+                    f"{self.config_entry.data[CONF_BASE_URL]}History/getHistoricoLeiturasComunicadas",
+                    headers={"X-Auth-Token": self.auth_data.get("token", "")},
+                    params=params,
+                    timeout=30
+                ) as response:
+                    content_type = response.headers.get('Content-Type', '').lower()
+
+                    # Handle non-JSON responses
+                    if 'application/json' not in content_type:
+                        response_text = await response.text()
+                        if response.status == 409:
+                            _LOGGER.error("HTTP 409 Conflict: Invalidating token and retrying")
+                            self.auth_data["token"] = None
+                            continue
+                            
+                        _LOGGER.error("Non-JSON response (Status: %s, Content-Type: %s): %s", 
+                                    response.status, content_type, response_text[:200])
+                        continue
+
+                    response.raise_for_status()
+                    data = await response.json()
+
+                    # Validate response structure
+                    if not isinstance(data, list):
+                        _LOGGER.error("Invalid data format received: %s", type(data))
+                        continue
+
+                    processed_readings = []
+                    for entry in data:
+                        try:
+                            entry_date = datetime.fromisoformat(entry.get('data', '').replace('Z', '+00:00'))
+                            for r in entry.get("leituras", []):
+                                if "codFuncao" in r and "leitura" in r:
+                                    processed_readings.append({
+                                        "codFuncao": r["codFuncao"],
+                                        "leitura": r["leitura"],
+                                        "entry_date": entry_date,
+                                        "isEstimativa": r.get("isEstimativa", False),
+                                        "origem": r.get("origem", "Unknown")
+                                    })
+                        except (KeyError, ValueError) as e:
+                            _LOGGER.debug("Error processing entry: %s", str(e))
+                            continue
+
+                    self.data[counter_num] = processed_readings
+                    self.last_update = datetime.now()
+                    return
+
+            except aiohttp.ClientResponseError as e:
+                _LOGGER.error("HTTP error %s: %s", e.status, e.message)
+                if e.status in [401, 403, 409]:
+                    self.auth_data["token"] = None
+                if attempt < retries - 1:
+                    await asyncio.sleep(2)
+                    continue
+                raise
+            except asyncio.TimeoutError:
+                _LOGGER.error("Request timed out")
+                if attempt < retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                raise
+            except Exception as e:
+                _LOGGER.error("Update failed: %s", str(e))
+                if attempt < retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                raise
 
     async def async_get_historical_data(self, counter, full_history=False):
         """Retrieve historical data with extended date range."""
@@ -159,6 +253,11 @@ class UportalEnergyPtSensor(SensorEntity):
         self.descricao = descricao
         self._attr_native_value = 0  # Default to 0 instead of Unknown
         
+        # Validate required fields
+        if not all([self.numero, self.produto, self.funcao]):
+            _LOGGER.error("Invalid sensor initialization parameters")
+            raise ValueError("Missing required sensor parameters")
+
         # Entity configuration
         self._attr_name = f"uPortal {PRODUCT_NAMES.get(produto, 'Utility')} {descricao} ({numero})"
         self._attr_unique_id = f"uportal_energy_pt_{produto}_{numero}_{funcao}"
