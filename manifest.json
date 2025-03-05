@@ -1,0 +1,10 @@
+{
+    "domain": "uportal_energy_pt",
+    "name": "uPortal Energy PT",
+    "version": "1.0.0",
+    "config_flow": true,
+    "documentation": "https://github.com/andreclemente/homeassistant-uportal-energy-pt",
+    "codeowners": ["@andreclemente"],
+    "requirements": ["aiohttp>=3.8.0"],
+    "iot_class": "cloud_polling"
+}
