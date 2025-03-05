@@ -172,7 +172,7 @@ class UportalEnergyPtSensor(SensorEntity):
         self._attr_state_class = "total_increasing"
         self._attr_device_class = "energy" if produto == "EB" else "gas" if produto == "GP" else "water"
         self._attr_native_value = 0
-        self._attr_available = Tru
+        self._attr_available = True
         eself.data = {}  # Stores current readings by counter number
 
     async def async_update_data(self, counter_params):
