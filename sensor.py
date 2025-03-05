@@ -32,11 +32,76 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     async_add_entities(sensors, True)
     
     # Register historical import service
-    async def async_import_history(call):
-        """Import historical data for all entities."""
-        _LOGGER.info("Starting historical data import")
-        for sensor in sensors:
-            await sensor.async_import_historical_data()
+    async def async_import_historical_data(self):
+        """Import historical data into HA statistics."""
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.statistics import async_add_external_statistics
+        from homeassistant.util import dt as dt_util
+    
+        _LOGGER.info("Starting historical import for %s", self.entity_id)
+        
+        try:
+            # Get existing statistics
+            hass = self.hass
+            start_time = dt_util.as_utc(datetime(2000, 1, 1))
+            end_time = dt_util.as_utc(datetime.now())
+            
+            # Get existing statistics points
+            existing_stats = await get_instance(hass).async_add_executor_job(
+                get_instance(hass).statistics_during_period,
+                start_time,
+                end_time,
+                [self.entity_id],
+                "hour",
+                None,
+                {"state", "sum"}
+            )
+            
+            # Get historical data from API
+            counter = {
+                "codigoMarca": self.marca,
+                "codigoProduto": self.produto,
+                "numeroContador": self.numero
+            }
+            readings = await self.api.async_get_historical_data(counter, full_history=True)
+            
+            # Prepare statistics data
+            stats_data = []
+            existing_times = {stat["start"] for stat in existing_stats.get(self.entity_id, [])}
+            
+            for reading in readings:
+                if reading["codFuncao"] != self.funcao:
+                    continue
+                    
+                start = dt_util.as_utc(reading["entry_date"])
+                if start.timestamp() in existing_times:
+                    continue
+                    
+                stats_data.append({
+                    "start": start,
+                    "state": reading["leitura"],
+                    "sum": reading["leitura"]
+                })
+            
+            if stats_data:
+                # Add statistics in batches
+                batch_size = 100
+                for i in range(0, len(stats_data), batch_size):
+                    await async_add_external_statistics(
+                        hass,
+                        {
+                            "source": DOMAIN,
+                            "name": self.name,
+                            "statistic_id": self.entity_id,
+                            "unit_of_measurement": self._attr_native_unit_of_measurement,
+                            "has_sum": True,
+                        },
+                        stats_data[i:i+batch_size]
+                    )
+                _LOGGER.info("Imported %d historical points for %s", len(stats_data), self.entity_id)
+                
+        except Exception as e:
+            _LOGGER.error("Historical import failed for %s: %s", self.entity_id, str(e))
     
     hass.services.async_register(DOMAIN, "import_history", async_import_history)
 
