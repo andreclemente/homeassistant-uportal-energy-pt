@@ -88,6 +88,7 @@ class UportalEnergyPtApiClient:
     async def async_get_historical_data(self, counter):
         """Retrieve historical data with proper error handling."""
         try:
+            await self.async_refresh_token()  # Ensure valid token before request
             params = {
                 "codigoMarca": counter["codigoMarca"],
                 "codigoProduto": counter["codigoProduto"],
@@ -203,16 +204,9 @@ class UportalEnergyPtSensor(SensorEntity):
                 {"state", "sum"}
             )
             
-            # Fetch historical data
-            counter = {
-                "codigoMarca": self.marca,
-                "codigoProduto": self.produto,
-                "numeroContador": self.numero
-            }
-            readings = await self.api.async_get_historical_data(counter)
-            
-            # Filter new entries
-            existing_times = {stat["start"] for stat in existing_stats.get(self.entity_id, [])}
+            # Correct existing times to use timestamps
+            existing_times = {stat["start"].timestamp() for stat in existing_stats.get(self.entity_id, [])}
+
             new_data = [
                 {
                     "start": reading["entry_date"],
