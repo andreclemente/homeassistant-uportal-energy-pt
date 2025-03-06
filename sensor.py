@@ -5,37 +5,40 @@ from datetime import datetime, timedelta
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
+from homeassistant.exceptions import ConfigEntryNotReady
 from .const import DOMAIN, CONF_BASE_URL, UNIT_MAP, PRODUCT_NAMES
 
 _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
+    """Set up integration entry point."""
     if not config_entry.data.get("counters"):
-        _LOGGER.error("No counters configured")
-        return False
+        _LOGGER.error("No counters configured in config entry")
+        return True  # Return True to allow setup but without entities
 
-    """Set up sensors and register import service."""
     api = UportalEnergyPtApiClient(hass, config_entry)
-    await api.async_initialize()
-    
+    try:
+        await api.async_initialize()
+    except Exception as e:
+        raise ConfigEntryNotReady(f"API initialization failed: {str(e)}") from e
+
     sensors = []
     for counter in config_entry.data["counters"]:
         product_type = counter["codigoProduto"]
         for function in counter["functions"]:
             sensor = UportalEnergyPtSensor(
-                api, 
+                api,
                 counter["codigoMarca"],
                 counter["numeroContador"],
                 product_type,
                 function["codigoFuncao"],
                 function["descFuncao"],
-                config_entry  # Critical config entry reference
+                config_entry
             )
             sensors.append(sensor)
     
     async_add_entities(sensors, True)
-
-    # Initialize domain data structure
+    
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][config_entry.entry_id] = {
         "sensors": sensors,
@@ -160,11 +163,20 @@ class UportalEnergyPtApiClient:
             self.data[counter_id] = []
 
     def _process_historical_data(self, data):
-        """Full data processing with validation."""
+        """Handle both ISO strings and Unix timestamps."""
         processed = []
         for entry in data:
             try:
-                entry_date = dt_util.parse_datetime(entry["data"].replace("Z", "+00:00"))
+                # Handle different date formats
+                date_str = entry.get("data")
+                if isinstance(date_str, (int, float)):
+                    # Unix timestamp in milliseconds
+                    entry_date = dt_util.utc_from_timestamp(date_str / 1000)
+                else:
+                    # ISO string with Zulu time
+                    date_str = date_str.replace("Z", "+00:00")
+                    entry_date = dt_util.parse_datetime(date_str)
+                
                 for reading in entry["leituras"]:
                     processed.append({
                         "codFuncao": reading["codFuncao"],
@@ -172,8 +184,8 @@ class UportalEnergyPtApiClient:
                         "entry_date": entry_date,
                         "isEstimativa": reading.get("isEstimativa", False)
                     })
-            except (KeyError, ValueError) as e:
-                _LOGGER.warning("Skipping invalid data entry: %s", str(e))
+            except (KeyError, ValueError, TypeError) as e:
+                _LOGGER.warning("Invalid data entry: %s", str(e))
         return processed
 
     async def async_get_historical_data(self, counter, start_date=None):
@@ -284,10 +296,10 @@ class UportalEnergyPtSensor(SensorEntity):
             _LOGGER.error("Update failed for %s: %s", self.entity_id, str(e))
 
     async def async_import_historical_data(self):
-        """Fixed historical import with modern Recorder API."""
+        """Robust historical data import."""
         from homeassistant.components.recorder import get_instance
         from homeassistant.components.recorder.statistics import async_add_external_statistics, get_last_statistics
-    
+
         try:
             _LOGGER.info("Starting historical import for %s", self.entity_id)
             
@@ -327,6 +339,7 @@ class UportalEnergyPtSensor(SensorEntity):
                     for reading in readings
                     if (reading["codFuncao"] == self.funcao and
                         not reading["isEstimativa"] and
+                        hasattr(reading["entry_date"], 'timestamp') and  # Validate datetime
                         reading["entry_date"].timestamp() not in existing_times)
                 ]
                 
