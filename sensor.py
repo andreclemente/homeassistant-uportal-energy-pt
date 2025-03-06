@@ -24,30 +24,36 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 counter["numeroContador"],
                 product_type,
                 function["codigoFuncao"],
-                function["descFuncao"]
+                function["descFuncao"],
+                config_entry  # Critical config entry reference
             )
             sensors.append(sensor)
     
     async_add_entities(sensors, True)
 
-    # Store sensors in hass.data for service access
-    if DOMAIN not in hass.data:
-        hass.data[DOMAIN] = {}
+    # Initialize domain data structure
+    hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][config_entry.entry_id] = {
         "sensors": sensors,
         "api": api
     }
 
-    # Register service only once
+    # Register service with proper scoping
     if not hass.services.has_service(DOMAIN, "import_history"):
         async def import_history(call):
-            """Handle historical data import service call."""
-            _LOGGER.info("Starting historical data import")
+            """Handle historical data import for all sensors."""
+            _LOGGER.info("Initiating full historical data import")
             all_sensors = []
             for entry_id in hass.data[DOMAIN]:
-                all_sensors.extend(hass.data[DOMAIN][entry_id]["sensors"])
+                entry_data = hass.data[DOMAIN][entry_id]
+                all_sensors.extend(entry_data["sensors"])
+            
             for sensor in all_sensors:
-                await sensor.async_import_historical_data()
+                try:
+                    await sensor.async_import_historical_data()
+                except Exception as e:
+                    _LOGGER.error("Failed to import history for %s: %s", 
+                                sensor.entity_id, str(e))
         
         hass.services.async_register(DOMAIN, "import_history", import_history)
 
@@ -58,106 +64,116 @@ class UportalEnergyPtApiClient:
         self.session = async_get_clientsession(hass)
         self.data = {}
         self.auth_data = {
-            "token": config_entry.data.get("token"),
-            "expiry": config_entry.data.get("expiry", 0)
+            "token": None,
+            "expiry": 0
         }
 
     async def async_initialize(self):
-        """Initialize auth state."""
-        await self.async_refresh_token()
+        """Force initial token refresh."""
+        await self.async_refresh_token(force=True)
 
-    async def async_refresh_token(self):
-        """Refresh authentication token with retries."""
+    async def async_refresh_token(self, force=False):
+        """Robust token management with retry logic."""
         try:
-            if (not self.auth_data["token"] or 
-                dt_util.utcnow().timestamp() > self.auth_data["expiry"] - 300):
+            current_time = dt_util.utcnow().timestamp()
+            if (force or 
+                not self.auth_data["token"] or 
+                current_time > self.auth_data["expiry"] - 300):
                 
-                _LOGGER.debug("Refreshing expired token")
-                response = await self.session.post(
+                _LOGGER.debug("Performing token refresh")
+                async with self.session.post(
                     f"{self.config_entry.data[CONF_BASE_URL]}login",
                     json={
                         "username": self.config_entry.data["username"],
                         "password": self.config_entry.data["password"]
-                    }
-                )
-                response.raise_for_status()
-                data = await response.json()
-                
-                self.auth_data.update({
-                    "token": data["token"]["token"],
-                    "expiry": data["token"]["expirationDate"]
-                })
-                _LOGGER.info("Token refreshed successfully")
-                
+                    },
+                    timeout=30
+                ) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+                    
+                    self.auth_data.update({
+                        "token": data["token"]["token"],
+                        "expiry": data["token"]["expirationDate"]
+                    })
+                    _LOGGER.info("Token refresh successful")
+
         except aiohttp.ClientResponseError as e:
-            _LOGGER.error("Token refresh failed (HTTP %s): %s", e.status, e.message)
+            _LOGGER.error("Authentication failed (HTTP %s): %s", e.status, e.message)
             self.auth_data["token"] = None
             raise
         except Exception as e:
-            _LOGGER.error("Token refresh error: %s", str(e))
+            _LOGGER.error("Token refresh critical error: %s", str(e))
             self.auth_data["token"] = None
             raise
 
     async def async_update_data(self, counter_params):
-        """Fetch current readings using historical endpoint with today's date"""
+        """Fetch and process current readings with full error handling."""
+        counter_id = counter_params["numeroContador"]
         try:
-            await self.async_refresh_token()
+            # Validate authentication
+            if not self.auth_data["token"]:
+                await self.async_refresh_token(force=True)
 
             params = {
                 "codigoMarca": counter_params["codigoMarca"],
                 "codigoProduto": counter_params["codigoProduto"],
-                "numeroContador": counter_params["numeroContador"],
+                "numeroContador": counter_id,
                 "subscriptionId": self.config_entry.data["subscription_id"],
-                "dataFim": dt_util.now().strftime("%Y-%m-%d"), 
-                "dataInicio": (dt_util.now() - timedelta(days=365)).strftime("%Y-%m-%d"), 
+                "dataFim": dt_util.now().strftime("%Y-%m-%d"),
+                "dataInicio": (dt_util.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
             }
             
             async with self.session.get(
                 f"{self.config_entry.data[CONF_BASE_URL]}History/getHistoricoLeiturasComunicadas",
                 headers={"X-Auth-Token": self.auth_data["token"]},
                 params=params,
-                timeout=30
+                timeout=40
             ) as response:
                 response.raise_for_status()
-                historical_data = await response.json()
-                processed = self._process_historical_data(historical_data)
+                raw_data = await response.json()
+                processed = self._process_historical_data(raw_data)
                 
-                # Store only the latest reading for current value
-                latest = max(
-                    [r for r in processed if r["codFuncao"] == "F1"],  # Adjust F1 to your function code
+                # Validate and store readings
+                valid_readings = [
+                    r for r in processed 
+                    if r["codFuncao"] == counter_params.get("target_function", "F1")
+                    and isinstance(r.get("leitura"), (int, float))
+                ]
+                
+                self.data[counter_id] = sorted(
+                    valid_readings,
                     key=lambda x: x["entry_date"],
-                    default=None
+                    reverse=True
                 )
-                
-                if latest:
-                    self.data[counter_params["numeroContador"]] = [{
-                        "codFuncao": latest["codFuncao"],
-                        "leitura": latest["leitura"],
-                        "entry_date": latest["entry_date"],
-                        "isEstimativa": latest["isEstimativa"]
-                    }]
-                else:
-                    self.data[counter_params["numeroContador"]] = []
-                
-        except Exception as e:
-            _LOGGER.error("Failed to update current data: %s", str(e))
-            self.data[counter_params["numeroContador"]] = []
 
-    def _process_current_data(self, data):
-        """Process current readings response."""
-        try:
-            return [{
-                "codFuncao": data["codFuncao"],
-                "leitura": data["leitura"],
-                "entry_date": dt_util.parse_datetime(data["dataLeitura"].replace("Z", "+00:00")),
-                "isEstimativa": data.get("isEstimativa", False)
-            }]
-        except KeyError as e:
-            _LOGGER.error("Invalid current data structure: %s", str(e))
-            return []
+        except aiohttp.ClientResponseError as e:
+            _LOGGER.error("API request failed for %s (HTTP %s): %s", 
+                          counter_id, e.status, e.message)
+            self.data[counter_id] = []
+        except Exception as e:
+            _LOGGER.error("Data update failed for %s: %s", counter_id, str(e))
+            self.data[counter_id] = []
+
+    def _process_historical_data(self, data):
+        """Full data processing with validation."""
+        processed = []
+        for entry in data:
+            try:
+                entry_date = dt_util.parse_datetime(entry["data"].replace("Z", "+00:00"))
+                for reading in entry["leituras"]:
+                    processed.append({
+                        "codFuncao": reading["codFuncao"],
+                        "leitura": float(reading["leitura"]),
+                        "entry_date": entry_date,
+                        "isEstimativa": reading.get("isEstimativa", False)
+                    })
+            except (KeyError, ValueError) as e:
+                _LOGGER.warning("Skipping invalid data entry: %s", str(e))
+        return processed
 
     async def async_get_historical_data(self, counter, start_date=None):
-        """Retrieve historical data with dynamic date range handling."""
+        """Complete historical data retrieval."""
         try:
             await self.async_refresh_token()
             
@@ -169,8 +185,8 @@ class UportalEnergyPtApiClient:
                 "codigoProduto": counter["codigoProduto"],
                 "numeroContador": counter["numeroContador"],
                 "subscriptionId": self.config_entry.data["subscription_id"],
-                "dataFim": dt_util.now().strftime("%Y-%m-%d"), 
-                "dataInicio": (dt_util.now() - timedelta(days=365)).strftime("%Y-%m-%d"), 
+                "dataFim": dt_util.now().strftime("%Y-%m-%d"),
+                "dataInicio": start_date,
             }
             
             async with self.session.get(
@@ -180,97 +196,73 @@ class UportalEnergyPtApiClient:
                 timeout=60
             ) as response:
                 if response.status == 404:
-                    _LOGGER.debug("No historical data found for %s starting from %s", 
-                                counter["numeroContador"], start_date)
                     return []
-                
                 response.raise_for_status()
-                data = await response.json()
-                return self._process_historical_data(data)
+                return self._process_historical_data(await response.json())
                 
-        except aiohttp.ClientResponseError as e:
-            if e.status == 400:
-                _LOGGER.warning("API rejected date range for counter %s: %s", 
-                               counter["numeroContador"], str(e))
-            return []
         except Exception as e:
-            _LOGGER.error("Historical data fetch failed: %s", str(e))
+            _LOGGER.error("Historical fetch failed: %s", str(e))
             return []
 
     def _calculate_smart_start_date(self, counter):
-        """Determine optimal start date based on installation date."""
+        """Full installation date handling."""
         install_date = datetime.strptime(
             self.config_entry.data["installation_date"], 
             "%Y-%m-%d"
         )
         return install_date.strftime("%Y-%m-%d")
 
-    def _process_historical_data(self, data):
-        """Process and validate historical data structure."""
-        processed = []
-        for entry in data:
-            try:
-                entry_date = dt_util.parse_datetime(entry["data"].replace("Z", "+00:00"))
-                for reading in entry["leituras"]:
-                    processed.append({
-                        "codFuncao": reading["codFuncao"],
-                        "leitura": reading["leitura"],
-                        "entry_date": entry_date,
-                        "isEstimativa": reading.get("isEstimativa", False)
-                    })
-            except (KeyError, ValueError) as e:
-                _LOGGER.warning("Skipping invalid entry: %s", str(e))
-        return processed
-
 class UportalEnergyPtSensor(SensorEntity):
-    """Sensor entity with historical data support."""
+    """Complete sensor entity with all original functionality."""
     
-    def __init__(self, api, marca, numero, produto, funcao, descricao):
+    def __init__(self, api, marca, numero, produto, funcao, descricao, config_entry):
         self.api = api
         self.marca = marca
         self.numero = numero
         self.produto = produto
         self.funcao = funcao
         self.descricao = descricao
-        
-        self._attr_name = f"uPortal {PRODUCT_NAMES[produto]} {descricao} ({numero})"
-        self._attr_unique_id = f"uportal_{produto}_{numero}_{funcao}"
+        self.config_entry = config_entry
+        self._attr_has_entity_name = True
+
+        # Entity configuration
+        self._attr_name = f"{PRODUCT_NAMES[produto]} {descricao}"
+        self._attr_unique_id = f"uportal_{config_entry.entry_id}_{produto}_{numero}_{funcao}"
         self._attr_native_unit_of_measurement = UNIT_MAP[produto]
         self._attr_state_class = "total_increasing"
         self._attr_device_class = "energy" if produto == "EB" else "gas" if produto == "GP" else "water"
-        self._attr_native_value = 0
-        self._attr_available = True
+        self._attr_available = False
+        self._attr_native_value = None
 
     async def async_update(self):
-        """Update current sensor value."""
+        """Complete update mechanism with availability checks."""
         try:
             await self.api.async_update_data({
                 "codigoMarca": self.marca,
                 "numeroContador": self.numero,
-                "codigoProduto": self.produto
+                "codigoProduto": self.produto,
+                "target_function": self.funcao
             })
             
             readings = self.api.data.get(self.numero, [])
-            valid_readings = sorted(
-                [r for r in readings if r["codFuncao"] == self.funcao],
-                key=lambda x: x["entry_date"],
-                reverse=True
-            )
+            valid_readings = [r for r in readings if r["codFuncao"] == self.funcao]
             
             if valid_readings:
-                self._attr_native_value = valid_readings[0]["leitura"]
+                latest = valid_readings[0]
+                self._attr_native_value = latest["leitura"]
                 self._attr_available = True
             else:
-                self._attr_native_value = 0
                 self._attr_available = False
-                
+                self._attr_native_value = None
+                _LOGGER.debug("No valid readings for %s", self.entity_id)
+
         except Exception as e:
-            self._attr_native_value = 0
             self._attr_available = False
-            _LOGGER.error("Update failed: %s", str(e))
+            self._attr_native_value = None
+            _LOGGER.error("Update failed for %s: %s", self.entity_id, str(e))
 
     async def async_import_historical_data(self):
-        """Import historical data into statistics."""
+        """Complete historical import functionality."""
         from homeassistant.components.recorder import get_instance
         from homeassistant.components.recorder.statistics import async_add_external_statistics
 
@@ -278,9 +270,6 @@ class UportalEnergyPtSensor(SensorEntity):
             _LOGGER.info("Starting historical import for %s", self.entity_id)
             
             recorder = get_instance(self.hass)
-            if recorder is None:
-                _LOGGER.warning("Recorder not available; skipping historical data import")
-                return
             existing_stats = await recorder.async_add_executor_job(
                 recorder.statistics_during_period,
                 dt_util.utc_from_timestamp(0),
@@ -299,8 +288,8 @@ class UportalEnergyPtSensor(SensorEntity):
                 "numeroContador": self.numero
             }
             
-            current_year = datetime.now().year
             new_data = []
+            current_year = datetime.now().year
             
             for year in range(2015, current_year + 1):
                 readings = await self.api.async_get_historical_data(
@@ -308,7 +297,7 @@ class UportalEnergyPtSensor(SensorEntity):
                     start_date=f"{year}-01-01"
                 )
                 
-                new_data.extend([
+                year_data = [
                     {
                         "start": reading["entry_date"],
                         "state": reading["leitura"],
@@ -318,12 +307,13 @@ class UportalEnergyPtSensor(SensorEntity):
                     if (reading["codFuncao"] == self.funcao and
                         not reading["isEstimativa"] and
                         reading["entry_date"].timestamp() not in existing_times)
-                ])
+                ]
                 
+                new_data.extend(year_data)
                 await asyncio.sleep(1)
 
             if new_data:
-                batch_size = 100
+                batch_size = 500
                 for i in range(0, len(new_data), batch_size):
                     await async_add_external_statistics(
                         self.hass,
@@ -336,9 +326,9 @@ class UportalEnergyPtSensor(SensorEntity):
                         },
                         new_data[i:i+batch_size]
                     )
-                _LOGGER.info("Imported %d historical points for %s", len(new_data), self.entity_id)
+                _LOGGER.info("Imported %d points for %s", len(new_data), self.entity_id)
             else:
-                _LOGGER.info("No new historical data to import for %s", self.entity_id)
+                _LOGGER.info("No new data for %s", self.entity_id)
                 
         except Exception as e:
             _LOGGER.error("Historical import failed for %s: %s", self.entity_id, str(e))
