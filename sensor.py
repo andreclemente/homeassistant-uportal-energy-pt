@@ -265,6 +265,9 @@ class UportalEnergyPtSensor(SensorEntity):
             _LOGGER.info("Starting historical import for %s", self.entity_id)
             
             recorder = get_instance(self.hass)
+            if recorder is None:
+                _LOGGER.warning("Recorder not available; skipping historical data import")
+                return
             existing_stats = await recorder.async_add_executor_job(
                 recorder.statistics_during_period,
                 dt_util.utc_from_timestamp(0),
