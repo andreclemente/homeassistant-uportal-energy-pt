@@ -10,6 +10,10 @@ from .const import DOMAIN, CONF_BASE_URL, UNIT_MAP, PRODUCT_NAMES
 _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
+    if not config_entry.data.get("counters"):
+        _LOGGER.error("No counters configured")
+        return False
+
     """Set up sensors and register import service."""
     api = UportalEnergyPtApiClient(hass, config_entry)
     await api.async_initialize()
@@ -262,25 +266,24 @@ class UportalEnergyPtSensor(SensorEntity):
             _LOGGER.error("Update failed for %s: %s", self.entity_id, str(e))
 
     async def async_import_historical_data(self):
-        """Complete historical import functionality."""
+        """Fixed historical import with modern Recorder API."""
         from homeassistant.components.recorder import get_instance
-        from homeassistant.components.recorder.statistics import async_add_external_statistics
-
+        from homeassistant.components.recorder.statistics import async_add_external_statistics, get_last_statistics
+    
         try:
             _LOGGER.info("Starting historical import for %s", self.entity_id)
             
-            recorder = get_instance(self.hass)
-            existing_stats = await recorder.async_add_executor_job(
-                recorder.statistics_during_period,
-                dt_util.utc_from_timestamp(0),
-                None,
-                [self.entity_id],
-                "hour",
-                None,
+            # Get existing statistics using modern method
+            last_stats = await get_instance(self.hass).async_add_executor_job(
+                get_last_statistics,
+                self.hass,
+                1,
+                self.entity_id,
+                True,
                 {"state", "sum"}
             )
-            
-            existing_times = {stat["start"].timestamp() for stat in existing_stats.get(self.entity_id, [])}
+    
+            existing_times = {stat["start"].timestamp() for stat in last_stats.get(self.entity_id, [])}
             
             counter = {
                 "codigoMarca": self.marca,
@@ -311,21 +314,20 @@ class UportalEnergyPtSensor(SensorEntity):
                 
                 new_data.extend(year_data)
                 await asyncio.sleep(1)
-
+    
             if new_data:
-                batch_size = 500
-                for i in range(0, len(new_data), batch_size):
-                    await async_add_external_statistics(
-                        self.hass,
-                        {
+                await async_add_external_statistics(
+                    self.hass,
+                    {
+                        "metadata": {
                             "source": DOMAIN,
                             "name": self.name,
                             "statistic_id": self.entity_id,
                             "unit_of_measurement": self._attr_native_unit_of_measurement,
-                            "has_sum": True,
                         },
-                        new_data[i:i+batch_size]
-                    )
+                        "stats": new_data
+                    }
+                )
                 _LOGGER.info("Imported %d points for %s", len(new_data), self.entity_id)
             else:
                 _LOGGER.info("No new data for %s", self.entity_id)
