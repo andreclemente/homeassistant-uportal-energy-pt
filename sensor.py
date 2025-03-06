@@ -30,13 +30,26 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     
     async_add_entities(sensors, True)
 
-    async def import_history(call):
-        """Handle historical data import service call."""
-        _LOGGER.info("Starting historical data import")
-        for sensor in sensors:
-            await sensor.async_import_historical_data()
-    
-    hass.services.async_register(DOMAIN, "import_history", import_history)
+    # Store sensors in hass.data for service access
+    if DOMAIN not in hass.data:
+        hass.data[DOMAIN] = {}
+    hass.data[DOMAIN][config_entry.entry_id] = {
+        "sensors": sensors,
+        "api": api
+    }
+
+    # Register service only once
+    if not hass.services.has_service(DOMAIN, "import_history"):
+        async def import_history(call):
+            """Handle historical data import service call."""
+            _LOGGER.info("Starting historical data import")
+            all_sensors = []
+            for entry_id in hass.data[DOMAIN]:
+                all_sensors.extend(hass.data[DOMAIN][entry_id]["sensors"])
+            for sensor in all_sensors:
+                await sensor.async_import_historical_data()
+        
+        hass.services.async_register(DOMAIN, "import_history", import_history)
 
 class UportalEnergyPtApiClient:
     def __init__(self, hass, config_entry):
