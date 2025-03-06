@@ -86,25 +86,46 @@ class UportalEnergyPtApiClient:
             raise
 
     async def async_update_data(self, counter_params):
-        """Fetch current readings for a specific counter."""
+        """Fetch current readings using historical endpoint with today's date"""
         try:
             await self.async_refresh_token()
+            
+            today = dt_util.now().strftime("%Y-%m-%d")
             params = {
                 "codigoMarca": counter_params["codigoMarca"],
                 "codigoProduto": counter_params["codigoProduto"],
                 "numeroContador": counter_params["numeroContador"],
-                "subscriptionId": self.config_entry.data["subscription_id"]
+                "subscriptionId": self.config_entry.data["subscription_id"],
+                "dataFim": today,
+                "dataInicio": today
             }
             
             async with self.session.get(
-                f"{self.config_entry.data[CONF_BASE_URL]}Readings/getUltimaLeituraComunicada",
+                f"{self.config_entry.data[CONF_BASE_URL]}History/getHistoricoLeiturasComunicadas",
                 headers={"X-Auth-Token": self.auth_data["token"]},
                 params=params,
                 timeout=30
             ) as response:
                 response.raise_for_status()
-                data = await response.json()
-                self.data[counter_params["numeroContador"]] = self._process_current_data(data)
+                historical_data = await response.json()
+                processed = self._process_historical_data(historical_data)
+                
+                # Store only the latest reading for current value
+                latest = max(
+                    [r for r in processed if r["codFuncao"] == "F1"],  # Adjust F1 to your function code
+                    key=lambda x: x["entry_date"],
+                    default=None
+                )
+                
+                if latest:
+                    self.data[counter_params["numeroContador"]] = [{
+                        "codFuncao": latest["codFuncao"],
+                        "leitura": latest["leitura"],
+                        "entry_date": latest["entry_date"],
+                        "isEstimativa": latest["isEstimativa"]
+                    }]
+                else:
+                    self.data[counter_params["numeroContador"]] = []
                 
         except Exception as e:
             _LOGGER.error("Failed to update current data: %s", str(e))
