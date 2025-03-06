@@ -199,22 +199,40 @@ class UportalEnergyPtApiClient:
                 params=params,
                 timeout=60
             ) as response:
-                if response.status == 404:
+                if response.status in (404, 500):
+                    _LOGGER.warning("Server returned %s for %s", response.status, counter["numeroContador"])
                     return []
                 response.raise_for_status()
-                return self._process_historical_data(await response.json())
+                try:
+                    data = await response.json()
+                except aiohttp.ContentTypeError as e:
+                    _LOGGER.error("Invalid JSON response for %s: %s", counter["numeroContador"], str(e))
+                    return []
+                return self._process_historical_data(data)
                 
+        except aiohttp.ClientResponseError as e:
+            if e.status == 500:
+                _LOGGER.error("Server error 500 for counter %s: %s", counter["numeroContador"], e.message)
+            else:
+                _LOGGER.error("HTTP error %s for counter %s: %s", e.status, counter["numeroContador"], e.message)
+            return []
         except Exception as e:
-            _LOGGER.error("Historical fetch failed: %s", str(e))
+            _LOGGER.error("Historical fetch failed for %s: %s", counter["numeroContador"], str(e))
             return []
 
     def _calculate_smart_start_date(self, counter):
-        """Full installation date handling."""
-        install_date = datetime.strptime(
-            self.config_entry.data["installation_date"], 
-            "%Y-%m-%d"
-        )
-        return install_date.strftime("%Y-%m-%d")
+        """Full installation date handling with adjustment for gas."""
+        if counter["codigoProduto"] == "GP":
+            # Gas: Start date is one year ago to prevent server errors
+            start_date = dt_util.now() - timedelta(days=365)
+            return start_date.strftime("%Y-%m-%d")
+        else:
+            # Other products use installation date
+            install_date = datetime.strptime(
+                self.config_entry.data["installation_date"], 
+                "%Y-%m-%d"
+            )
+            return install_date.strftime("%Y-%m-%d")
 
 class UportalEnergyPtSensor(SensorEntity):
     """Complete sensor entity with all original functionality."""
