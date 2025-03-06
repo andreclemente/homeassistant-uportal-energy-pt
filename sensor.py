@@ -89,15 +89,14 @@ class UportalEnergyPtApiClient:
         """Fetch current readings using historical endpoint with today's date"""
         try:
             await self.async_refresh_token()
-            
-            today = dt_util.now().strftime("%Y-%m-%d")
+
             params = {
                 "codigoMarca": counter_params["codigoMarca"],
                 "codigoProduto": counter_params["codigoProduto"],
                 "numeroContador": counter_params["numeroContador"],
                 "subscriptionId": self.config_entry.data["subscription_id"],
-                "dataFim": today,
-                "dataInicio": today
+                "dataFim": dt_util.now().strftime("%Y-%m-%d"), 
+                "dataInicio": (dt_util.now() - timedelta(days=365)).strftime("%Y-%m-%d"), 
             }
             
             async with self.session.get(
@@ -157,8 +156,8 @@ class UportalEnergyPtApiClient:
                 "codigoProduto": counter["codigoProduto"],
                 "numeroContador": counter["numeroContador"],
                 "subscriptionId": self.config_entry.data["subscription_id"],
-                "dataFim": dt_util.now().strftime("%Y-%m-%d"),
-                "dataInicio": start_date
+                "dataFim": dt_util.now().strftime("%Y-%m-%d"), 
+                "dataInicio": (dt_util.now() - timedelta(days=365)).strftime("%Y-%m-%d"), 
             }
             
             async with self.session.get(
