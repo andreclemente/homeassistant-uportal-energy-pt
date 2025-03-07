@@ -290,7 +290,7 @@ class UportalEnergyPtSensor(SensorEntity):
         # Entity configuration
         self._attr_name = f"{PRODUCT_NAMES[produto]} {descricao}"
         self._attr_unique_id = f"uportal_{config_entry.entry_id}_{produto}_{numero}_{funcao}"
-        self._attr_statistic_id = self._attr_unique_id.replace(":", "_").replace(".", "_")
+        self._attr_statistic_id = self._attr_unique_id
         self._attr_native_unit_of_measurement = UNIT_MAP[produto]
         self._attr_state_class = "total_increasing"
         self._attr_device_class = "energy" if produto == "EB" else "gas" if produto == "GP" else "water"
@@ -416,7 +416,7 @@ class UportalEnergyPtSensor(SensorEntity):
                     {
                         "source": DOMAIN,
                         "name": self.name,
-                        "statistic_id": self.statistic_id,  # Use the dedicated statistic_id property
+                        "statistic_id": self._attr_statistic_id,  # Directly use the attribute
                         "unit_of_measurement": self._attr_native_unit_of_measurement,
                     },
                     new_data
