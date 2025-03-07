@@ -331,23 +331,31 @@ class UportalEnergyPtSensor(SensorEntity):
         try:
             _LOGGER.info("Starting historical import for %s", self.entity_id)
             
-            # Fetch all existing statistics
-            start_time = datetime.min.replace(tzinfo=dt_util.UTC)
+            # Use valid start date (January 1, 1970)
+            start_time = datetime(1970, 1, 1, tzinfo=dt_util.UTC)
             end_time = dt_util.now()
+            
             existing_stats = await get_instance(self.hass).async_add_executor_job(
                 statistics_during_period,
                 self.hass,
                 start_time,
                 end_time,
                 [self.entity_id],
-                "day",  # Match the data interval
+                "day",
                 None,
                 {"state", "sum"}
             )
-            existing_times = {
-                dt_util.parse_datetime(stat["start"]).timestamp()
-                for stat in existing_stats.get(self.entity_id, [])
-            }
+            
+            # Handle invalid dates in existing stats
+            existing_times = set()
+            for stat in existing_stats.get(self.entity_id, []):
+                try:
+                    parsed_time = dt_util.parse_datetime(stat["start"])
+                    if parsed_time:
+                        existing_times.add(parsed_time.timestamp())
+                except Exception as e:
+                    _LOGGER.warning("Skipped invalid date in stats: %s", str(e))
+                    continue
             
             counter = {
                 "codigoMarca": self.marca,
