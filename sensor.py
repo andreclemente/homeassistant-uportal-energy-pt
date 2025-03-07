@@ -2,6 +2,7 @@ import logging
 import aiohttp
 import asyncio
 from datetime import datetime, timedelta
+from dateutil.parser import parse as parse_datetime
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
@@ -99,9 +100,11 @@ class UportalEnergyPtApiClient:
                     response.raise_for_status()
                     data = await response.json()
                     
+                    # Parse expiration date
+                    expiry_date = parse_datetime(data["token"]["expirationDate"])
                     self.auth_data.update({
                         "token": data["token"]["token"],
-                        "expiry": data["token"]["expirationDate"]
+                        "expiry": expiry_date.timestamp()
                     })
                     _LOGGER.info("Token refresh successful")
 
@@ -131,33 +134,48 @@ class UportalEnergyPtApiClient:
                 "dataInicio": (dt_util.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
             }
             
-            async with self.session.get(
-                f"{self.config_entry.data[CONF_BASE_URL]}History/getHistoricoLeiturasComunicadas",
-                headers={"X-Auth-Token": self.auth_data["token"]},
-                params=params,
-                timeout=40
-            ) as response:
-                response.raise_for_status()
-                raw_data = await response.json()
-                processed = self._process_historical_data(raw_data)
-                
-                # Validate and store readings
-                valid_readings = [
-                    r for r in processed 
-                    if r["codFuncao"] == counter_params.get("target_function", "F1")
-                    and isinstance(r.get("leitura"), (int, float))
-                ]
-                
-                self.data[counter_id] = sorted(
-                    valid_readings,
-                    key=lambda x: x["entry_date"],
-                    reverse=True
-                )
-
-        except aiohttp.ClientResponseError as e:
-            _LOGGER.error("API request failed for %s (HTTP %s): %s", 
-                          counter_id, e.status, e.message)
-            self.data[counter_id] = []
+            for attempt in range(2):
+                try:
+                    async with self.session.get(
+                        f"{self.config_entry.data[CONF_BASE_URL]}History/getHistoricoLeiturasComunicadas",
+                        headers={"X-Auth-Token": self.auth_data["token"]},
+                        params=params,
+                        timeout=40
+                    ) as response:
+                        # Check content type
+                        content_type = response.headers.get('Content-Type', '')
+                        if 'application/json' not in content_type:
+                            _LOGGER.error("Unexpected content type %s for counter %s", content_type, counter_id)
+                            raise aiohttp.ClientResponseError(
+                                response.request_info,
+                                response.history,
+                                status=500,
+                                message=f"Unexpected content type: {content_type}",
+                                headers=response.headers
+                            )
+                        response.raise_for_status()
+                        raw_data = await response.json()
+                        processed = self._process_historical_data(raw_data)
+                        
+                        valid_readings = [
+                            r for r in processed 
+                            if r["codFuncao"] == counter_params.get("target_function", "F1")
+                            and isinstance(r.get("leitura"), (int, float))
+                        ]
+                        
+                        self.data[counter_id] = sorted(
+                            valid_readings,
+                            key=lambda x: x["entry_date"],
+                            reverse=True
+                        )
+                        break  # Exit retry loop on success
+                except aiohttp.ClientResponseError as e:
+                    if e.status == 401 and attempt == 0:
+                        _LOGGER.debug("Token expired, refreshing and retrying")
+                        await self.async_refresh_token(force=True)
+                        continue
+                    else:
+                        raise
         except Exception as e:
             _LOGGER.error("Data update failed for %s: %s", counter_id, str(e))
             self.data[counter_id] = []
@@ -190,47 +208,50 @@ class UportalEnergyPtApiClient:
 
     async def async_get_historical_data(self, counter, start_date=None):
         """Complete historical data retrieval."""
-        try:
-            await self.async_refresh_token()
-            
-            if not start_date:
-                start_date = self._calculate_smart_start_date(counter)
+        for attempt in range(2):
+            try:
+                await self.async_refresh_token()
                 
-            params = {
-                "codigoMarca": counter["codigoMarca"],
-                "codigoProduto": counter["codigoProduto"],
-                "numeroContador": counter["numeroContador"],
-                "subscriptionId": self.config_entry.data["subscription_id"],
-                "dataFim": dt_util.now().strftime("%Y-%m-%d"),
-                "dataInicio": start_date,
-            }
-            
-            async with self.session.get(
-                f"{self.config_entry.data[CONF_BASE_URL]}History/getHistoricoLeiturasComunicadas",
-                headers={"X-Auth-Token": self.auth_data["token"]},
-                params=params,
-                timeout=60
-            ) as response:
-                if response.status in (404, 500):
-                    _LOGGER.warning("Server returned %s for %s", response.status, counter["numeroContador"])
-                    return []
-                response.raise_for_status()
-                try:
+                if not start_date:
+                    start_date = self._calculate_smart_start_date(counter)
+                    
+                params = {
+                    "codigoMarca": counter["codigoMarca"],
+                    "codigoProduto": counter["codigoProduto"],
+                    "numeroContador": counter["numeroContador"],
+                    "subscriptionId": self.config_entry.data["subscription_id"],
+                    "dataFim": dt_util.now().strftime("%Y-%m-%d"),
+                    "dataInicio": start_date,
+                }
+                
+                async with self.session.get(
+                    f"{self.config_entry.data[CONF_BASE_URL]}History/getHistoricoLeiturasComunicadas",
+                    headers={"X-Auth-Token": self.auth_data["token"]},
+                    params=params,
+                    timeout=60
+                ) as response:
+                    if response.status in (404, 500):
+                        _LOGGER.warning("Server returned %s for %s", response.status, counter["numeroContador"])
+                        return []
+                    # Check content type
+                    content_type = response.headers.get('Content-Type', '')
+                    if 'application/json' not in content_type:
+                        _LOGGER.error("Unexpected content type: %s", content_type)
+                        return []
+                    response.raise_for_status()
                     data = await response.json()
-                except aiohttp.ContentTypeError as e:
-                    _LOGGER.error("Invalid JSON response for %s: %s", counter["numeroContador"], str(e))
+                    return self._process_historical_data(data)
+            except aiohttp.ClientResponseError as e:
+                if e.status == 401 and attempt == 0:
+                    await self.async_refresh_token(force=True)
+                    continue
+                else:
+                    _LOGGER.error("HTTP error %s for counter %s: %s", e.status, counter["numeroContador"], e.message)
                     return []
-                return self._process_historical_data(data)
-                
-        except aiohttp.ClientResponseError as e:
-            if e.status == 500:
-                _LOGGER.error("Server error 500 for counter %s: %s", counter["numeroContador"], e.message)
-            else:
-                _LOGGER.error("HTTP error %s for counter %s: %s", e.status, counter["numeroContador"], e.message)
-            return []
-        except Exception as e:
-            _LOGGER.error("Historical fetch failed for %s: %s", counter["numeroContador"], str(e))
-            return []
+            except Exception as e:
+                _LOGGER.error("Historical fetch failed for %s: %s", counter["numeroContador"], str(e))
+                return []
+        return []
 
     def _calculate_smart_start_date(self, counter):
         """Full installation date handling with adjustment for gas."""
@@ -298,22 +319,28 @@ class UportalEnergyPtSensor(SensorEntity):
     async def async_import_historical_data(self):
         """Robust historical data import."""
         from homeassistant.components.recorder import get_instance
-        from homeassistant.components.recorder.statistics import async_add_external_statistics, get_last_statistics
+        from homeassistant.components.recorder.statistics import async_add_external_statistics, statistics_during_period
 
         try:
             _LOGGER.info("Starting historical import for %s", self.entity_id)
             
-            # Get existing statistics using modern method
-            last_stats = await get_instance(self.hass).async_add_executor_job(
-                get_last_statistics,
+            # Fetch all existing statistics
+            start_time = datetime.min.replace(tzinfo=dt_util.UTC)
+            end_time = dt_util.now()
+            existing_stats = await get_instance(self.hass).async_add_executor_job(
+                statistics_during_period,
                 self.hass,
-                1,
-                self.entity_id,
-                True,
+                start_time,
+                end_time,
+                [self.entity_id],
+                "day",  # Match the data interval
+                None,
                 {"state", "sum"}
             )
-    
-            existing_times = {stat["start"].timestamp() for stat in last_stats.get(self.entity_id, [])}
+            existing_times = {
+                dt_util.parse_datetime(stat["start"]).timestamp()
+                for stat in existing_stats.get(self.entity_id, [])
+            }
             
             counter = {
                 "codigoMarca": self.marca,
@@ -325,10 +352,20 @@ class UportalEnergyPtSensor(SensorEntity):
             current_year = datetime.now().year
             
             for year in range(2015, current_year + 1):
-                readings = await self.api.async_get_historical_data(
-                    counter,
-                    start_date=f"{year}-01-01"
-                )
+                # Retry logic for historical fetch
+                for attempt in range(2):
+                    try:
+                        readings = await self.api.async_get_historical_data(
+                            counter,
+                            start_date=f"{year}-01-01"
+                        )
+                        break
+                    except aiohttp.ClientResponseError as e:
+                        if e.status == 401 and attempt == 0:
+                            await self.api.async_refresh_token(force=True)
+                            continue
+                        else:
+                            raise
                 
                 year_data = [
                     {
@@ -339,13 +376,11 @@ class UportalEnergyPtSensor(SensorEntity):
                     for reading in readings
                     if (reading["codFuncao"] == self.funcao and
                         not reading["isEstimativa"] and
-                        hasattr(reading["entry_date"], 'timestamp') and  # Validate datetime
                         reading["entry_date"].timestamp() not in existing_times)
                 ]
-                
                 new_data.extend(year_data)
                 await asyncio.sleep(1)
-    
+        
             if new_data:
                 await async_add_external_statistics(
                     self.hass,
