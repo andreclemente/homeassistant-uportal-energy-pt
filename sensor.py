@@ -327,7 +327,7 @@ class UportalEnergyPtSensor(SensorEntity):
         """Robust historical data import."""
         from homeassistant.components.recorder import get_instance
         from homeassistant.components.recorder.statistics import async_add_external_statistics, statistics_during_period
-
+    
         try:
             _LOGGER.info("Starting historical import for %s", self.entity_id)
             
@@ -349,8 +349,21 @@ class UportalEnergyPtSensor(SensorEntity):
             # Handle invalid dates in existing stats
             existing_times = set()
             for stat in existing_stats.get(self.entity_id, []):
+                start_value = stat.get("start")
+                parsed_time = None
+    
                 try:
-                    parsed_time = dt_util.parse_datetime(stat["start"])
+                    # Handle multiple data types
+                    if isinstance(start_value, str):
+                        parsed_time = dt_util.parse_datetime(start_value)
+                    elif isinstance(start_value, (int, float)):
+                        parsed_time = dt_util.utc_from_timestamp(start_value)
+                    elif isinstance(start_value, datetime):
+                        parsed_time = start_value
+                    else:
+                        _LOGGER.warning("Unsupported start type: %s", type(start_value))
+                        continue
+    
                     if parsed_time:
                         existing_times.add(parsed_time.timestamp())
                 except Exception as e:
