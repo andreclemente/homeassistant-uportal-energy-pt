@@ -65,6 +65,8 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         
         hass.services.async_register(DOMAIN, "import_history", import_history)
 
+    return True  # Added return statement to indicate successful setup
+
 class UportalEnergyPtApiClient:
     def __init__(self, hass, config_entry):
         self.hass = hass
@@ -289,7 +291,9 @@ class UportalEnergyPtSensor(SensorEntity):
 
         # Entity configuration
         self._attr_name = f"{PRODUCT_NAMES[produto]} {descricao}"
-        self._attr_unique_id = f"uportal_{config_entry.entry_id}_{produto}_{numero}_{funcao}"
+        # Sanitize entry_id by replacing hyphens with underscores
+        sanitized_entry_id = config_entry.entry_id.replace('-', '_')
+        self._attr_unique_id = f"uportal_{sanitized_entry_id}_{produto}_{numero}_{funcao}"
         self._attr_statistic_id = self._attr_unique_id
         self._attr_native_unit_of_measurement = UNIT_MAP[produto]
         self._attr_state_class = "total_increasing"
