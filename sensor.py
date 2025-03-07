@@ -327,7 +327,7 @@ class UportalEnergyPtSensor(SensorEntity):
         """Robust historical data import."""
         from homeassistant.components.recorder import get_instance
         from homeassistant.components.recorder.statistics import async_add_external_statistics, statistics_during_period
-    
+
         try:
             _LOGGER.info("Starting historical import for %s", self.entity_id)
             
@@ -351,7 +351,7 @@ class UportalEnergyPtSensor(SensorEntity):
             for stat in existing_stats.get(self.entity_id, []):
                 start_value = stat.get("start")
                 parsed_time = None
-    
+
                 try:
                     # Handle multiple data types
                     if isinstance(start_value, str):
@@ -363,7 +363,7 @@ class UportalEnergyPtSensor(SensorEntity):
                     else:
                         _LOGGER.warning("Unsupported start type: %s", type(start_value))
                         continue
-    
+
                     if parsed_time:
                         existing_times.add(parsed_time.timestamp())
                 except Exception as e:
@@ -412,15 +412,13 @@ class UportalEnergyPtSensor(SensorEntity):
             if new_data:
                 await async_add_external_statistics(
                     self.hass,
-                    {
-                        "metadata": {
-                            "source": DOMAIN,
-                            "name": self.name,
-                            "statistic_id": self.entity_id,
-                            "unit_of_measurement": self._attr_native_unit_of_measurement,
-                        },
-                        "stats": new_data
-                    }
+                    {  # Metadata dict
+                        "source": DOMAIN,
+                        "name": self.name,
+                        "statistic_id": self.entity_id,
+                        "unit_of_measurement": self._attr_native_unit_of_measurement,
+                    },
+                    new_data  # Statistics list
                 )
                 _LOGGER.info("Imported %d points for %s", len(new_data), self.entity_id)
             else:
