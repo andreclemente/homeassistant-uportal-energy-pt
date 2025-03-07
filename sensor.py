@@ -15,11 +15,11 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     """Set up integration entry point."""
     if not config_entry.data.get("counters"):
         _LOGGER.error("No counters configured in config entry")
-        return True  # Return True to allow setup but without entities
+        return True  # Allow setup without entities
 
-    api = UportalEnergyPtApiClient(hass, config_entry)
     try:
-        await api.async_initialize()
+        api = UportalEnergyPtApiClient(hass, config_entry)
+        await api.async_initialize()  # Validate token immediately
     except Exception as e:
         raise ConfigEntryNotReady(f"API initialization failed: {str(e)}") from e
 
@@ -100,8 +100,15 @@ class UportalEnergyPtApiClient:
                     response.raise_for_status()
                     data = await response.json()
                     
-                    # Parse expiration date
-                    expiry_date = parse_datetime(data["token"]["expirationDate"])
+                    # Handle expiration date (supports Unix timestamp or ISO string)
+                    expiry_value = data["token"]["expirationDate"]
+                    if isinstance(expiry_value, (int, float)):
+                        # Unix timestamp in milliseconds
+                        expiry_date = dt_util.utc_from_timestamp(expiry_value / 1000)
+                    else:
+                        # ISO string
+                        expiry_date = parse_datetime(expiry_value)
+                    
                     self.auth_data.update({
                         "token": data["token"]["token"],
                         "expiry": expiry_date.timestamp()
