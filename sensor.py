@@ -1,4 +1,5 @@
 import logging
+import re
 import aiohttp
 import asyncio
 from datetime import datetime, timedelta
@@ -11,15 +12,19 @@ from .const import DOMAIN, CONF_BASE_URL, UNIT_MAP, PRODUCT_NAMES
 
 _LOGGER = logging.getLogger(__name__)
 
+# Sanitize statistic_id - remove all non-safe characters
+def sanitize_stat_id(input_str):
+    return re.sub(r'[^a-zA-Z0-9_]', '_', input_str)
+
 async def async_setup_entry(hass, config_entry, async_add_entities):
     """Set up integration entry point."""
     if not config_entry.data.get("counters"):
         _LOGGER.error("No counters configured in config entry")
-        return True  # Allow setup without entities
+        return True
 
     try:
         api = UportalEnergyPtApiClient(hass, config_entry)
-        await api.async_initialize()  # Validate token immediately
+        await api.async_initialize()
     except Exception as e:
         raise ConfigEntryNotReady(f"API initialization failed: {str(e)}") from e
 
@@ -46,10 +51,8 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         "api": api
     }
 
-    # Register service with proper scoping
     if not hass.services.has_service(DOMAIN, "import_history"):
         async def import_history(call):
-            """Handle historical data import for all sensors."""
             _LOGGER.info("Initiating full historical data import")
             all_sensors = []
             for entry_id in hass.data[DOMAIN]:
@@ -65,7 +68,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         
         hass.services.async_register(DOMAIN, "import_history", import_history)
 
-    return True  # Added return statement to indicate successful setup
+    return True  # Explicit return statement
 
 class UportalEnergyPtApiClient:
     def __init__(self, hass, config_entry):
@@ -263,22 +266,23 @@ class UportalEnergyPtApiClient:
         return []
 
     def _calculate_smart_start_date(self, counter):
-        """Full installation date handling with adjustment for gas."""
-        if counter["codigoProduto"] == "GP":
-            # Gas: Start date is one year ago to prevent server errors
-            start_date = dt_util.now() - timedelta(days=365)
+        """Improved date handling with validation."""
+        try:
+            if counter["codigoProduto"] == "GP":
+                start_date = dt_util.now() - timedelta(days=365)
+            else:
+                install_date_str = self.config_entry.data["installation_date"]
+                install_date = datetime.strptime(install_date_str, "%Y-%m-%d")
+                start_date = max(
+                    install_date,
+                    dt_util.now() - timedelta(days=365*10)  # 10 years max
+                )
             return start_date.strftime("%Y-%m-%d")
-        else:
-            # Other products use installation date
-            install_date = datetime.strptime(
-                self.config_entry.data["installation_date"], 
-                "%Y-%m-%d"
-            )
-            return install_date.strftime("%Y-%m-%d")
+        except Exception as e:
+            _LOGGER.error("Invalid installation date: %s", str(e))
+            return (dt_util.now() - timedelta(days=365)).strftime("%Y-%m-%d")
 
 class UportalEnergyPtSensor(SensorEntity):
-    """Complete sensor entity with all original functionality."""
-    
     def __init__(self, api, marca, numero, produto, funcao, descricao, config_entry):
         self.api = api
         self.marca = marca
@@ -291,10 +295,10 @@ class UportalEnergyPtSensor(SensorEntity):
 
         # Entity configuration
         self._attr_name = f"{PRODUCT_NAMES[produto]} {descricao}"
-        # Sanitize entry_id by replacing hyphens with underscores
-        sanitized_entry_id = config_entry.entry_id.replace('-', '_')
-        self._attr_unique_id = f"uportal_{sanitized_entry_id}_{produto}_{numero}_{funcao}"
-        self._attr_statistic_id = self._attr_unique_id
+        # Enhanced ID sanitization
+        safe_entry_id = sanitize_stat_id(config_entry.entry_id)
+        self._attr_unique_id = f"uportal_{safe_entry_id}_{produto}_{numero}_{funcao}"
+        self._attr_statistic_id = self._attr_unique_id  # Ensure 1:1 mapping
         self._attr_native_unit_of_measurement = UNIT_MAP[produto]
         self._attr_state_class = "total_increasing"
         self._attr_device_class = "energy" if produto == "EB" else "gas" if produto == "GP" else "water"
@@ -329,11 +333,15 @@ class UportalEnergyPtSensor(SensorEntity):
             _LOGGER.error("Update failed for %s: %s", self.entity_id, str(e))
 
     async def async_import_historical_data(self):
-        """Robust historical data import."""
-        from homeassistant.components.recorder import get_instance
-        from homeassistant.components.recorder.statistics import async_add_external_statistics, statistics_during_period
-
+        """Improved historical import with parameter validation."""
         try:
+            # Validate counter configuration
+            if not all([self.marca, self.numero, self.produto]):
+                raise ValueError("Invalid counter configuration")
+            
+            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.statistics import async_add_external_statistics, statistics_during_period
+
             _LOGGER.info("Starting historical import for %s", self.entity_id)
             
             # Use valid start date (January 1, 1970)
@@ -430,4 +438,5 @@ class UportalEnergyPtSensor(SensorEntity):
                 _LOGGER.info("No new data for %s", self.entity_id)
                 
         except Exception as e:
-            _LOGGER.error("Historical import failed for %s: %s", self.entity_id, str(e))
+            _LOGGER.error("Historical import failed for %s: %s (Parameters: marca=%s, numero=%s, produto=%s)",
+                        self.entity_id, str(e), self.marca, self.numero, self.produto)
