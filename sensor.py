@@ -310,13 +310,8 @@ class UportalEnergyPtSensor(SensorEntity):
             _LOGGER.error("Update failed for %s: %s", self.entity_id, str(e))
 
     async def async_import_historical_data(self):
-        """Improved historical import with recorder checks."""
-        if not recorder.is_connected():
-            _LOGGER.error("Recorder is not connected. Cannot import history.")
-            return
-        
+        """Improved historical import with recorder checks."""        
         try:
-            """Import historical data with proper recorder checks."""
             from homeassistant.components.recorder import get_instance
             from homeassistant.components.recorder.statistics import (
                 async_add_external_statistics,
