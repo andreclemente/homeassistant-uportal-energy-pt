@@ -434,6 +434,8 @@ class UportalEnergyPtSensor(SensorEntity):
                         "name": self.name,
                         "statistic_id": self._attr_statistic_id,
                         "unit_of_measurement": self._attr_native_unit_of_measurement,
+                        "has_mean": False,  # Explicitly set boolean values
+                        "has_sum": True,     # Since we're providing sum values
                     },
                     new_data
                 )
