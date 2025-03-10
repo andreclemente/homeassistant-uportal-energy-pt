@@ -276,7 +276,7 @@ class UportalEnergyPtSensor(SensorEntity):
         self._attr_name = f"{PRODUCT_NAMES[produto]} {descricao}"
         # Enhanced ID sanitization
         safe_entry_id = sanitize_stat_id(config_entry.entry_id)
-        self._attr_unique_id = f"uportal_{safe_entry_id}_{produto}_{numero}_{funcao}"
+        self._attr_unique_id = f"uportal_{safe_entry_id}_{produto.lower()}_{numero}_{funcao.lower()}"
         self._attr_statistic_id = f"{DOMAIN}:{self._attr_unique_id}"  # Prefix with integration domain
         self._attr_native_unit_of_measurement = UNIT_MAP[produto]
         self._attr_state_class = "total_increasing"
@@ -325,14 +325,14 @@ class UportalEnergyPtSensor(SensorEntity):
                 self.hass,
                 start_time,
                 end_time,
-                [self._attr_statistic_id],  # Use statistic_id instead of entity_id
+                [self._attr_statistic_id],  # <- Use statistic_id instead of entity_id
                 "day",
                 None,
                 {"state", "sum"}
             )
             # Handle invalid dates in existing stats
             existing_times = set()
-            for stat in existing_stats.get(self._attr_statistic_id, []):  # Use statistic_id here
+            for stat in existing_stats.get(self._attr_statistic_id, []):  # <- Use statistic_id here
                 start_value = stat.get("start")
                 parsed_time = None
                 try:
