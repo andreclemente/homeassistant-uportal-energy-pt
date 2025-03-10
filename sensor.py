@@ -379,7 +379,7 @@ class UportalEnergyPtSensor(SensorEntity):
             }
     
             new_data = []
-            current_year = datetime.now().year
+            current_year = datetime.now().year  # Define current_year
     
             for year in range(2015, current_year + 1):
                 for attempt in range(3):  # Increased retry attempts
@@ -387,7 +387,9 @@ class UportalEnergyPtSensor(SensorEntity):
                         if not self.api.auth_data.get("token"):
                             await self.api.async_refresh_token(force=True)
     
-                        readings = await self.api.async_get_historical_data(counter, f"{year}-01-01")
+                        # Ensure headers use the refreshed token
+                        headers = {"X-Auth-Token": self.api.auth_data["token"]}
+                        readings = await self.api.async_get_historical_data(counter, f"{year}-01-01",headers=headers)
                         readings = list(readings) if readings else []
                         _LOGGER.debug("Fetched %d entries for %s year %s", len(readings), self.entity_id, year)
                         break
@@ -396,11 +398,11 @@ class UportalEnergyPtSensor(SensorEntity):
                             await self.api.async_refresh_token(force=True)
                             continue
                         else:
-                            _LOGGER.error("API error for year %s: %s", year, str(e))
+                            _LOGGER.error("API error for %s (year %s): %s", self.entity_id, year, str(e))
                             readings = []
                             break
                     except Exception as e:
-                        _LOGGER.error("Temporary failure in %s: %s", year, str(e))
+                        _LOGGER.error("Temporary failure in %s (year %s): %s", self.entity_id, year, str(e))
                         readings = []
                         break
     
@@ -416,7 +418,7 @@ class UportalEnergyPtSensor(SensorEntity):
                         reading["entry_date"].timestamp() not in existing_times)
                 ]
                 new_data.extend(year_data)
-                await asyncio.sleep(1)  # Add delay between years to avoid rate limiting
+                await asyncio.sleep(3)  # Increased delay between years to avoid rate limiting
     
             if new_data:
                 await async_add_external_statistics(
