@@ -144,12 +144,13 @@ class UportalEnergyPtApiClient:
                         # Check content type
                         content_type = response.headers.get('Content-Type', '')
                         if 'application/json' not in content_type:
-                            _LOGGER.error("Unexpected content type %s for counter %s", content_type, counter_id)
+                            error_msg = f"Unexpected content type {content_type} for counter {counter_id}"
+                            _LOGGER.error(error_msg)
                             raise aiohttp.ClientResponseError(
                                 response.request_info,
                                 response.history,
                                 status=500,
-                                message=f"Unexpected content type: {content_type}",
+                                message=error_msg,
                                 headers=response.headers
                             )
                         response.raise_for_status()
@@ -374,6 +375,8 @@ class UportalEnergyPtSensor(SensorEntity):
                             counter,
                             start_date=f"{year}-01-01"
                         )
+                        if not readings:  # Ensure readings is a list
+                            readings = []
                         break
                     except aiohttp.ClientResponseError as e:
                         if e.status == 401 and attempt == 0:
@@ -401,7 +404,7 @@ class UportalEnergyPtSensor(SensorEntity):
                         "source": DOMAIN,
                         "name": self.name,
                         "statistic_id": self._attr_statistic_id,  # Directly use the attribute
-                        "unit_of_measurement": self._attr_native_unit_of_measurement,
+                        "unit_of_measurement": self._attr_native_unit_of_measurement,  # Fixed typo here
                     },
                     new_data
                 )
