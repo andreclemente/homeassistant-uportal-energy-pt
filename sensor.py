@@ -195,6 +195,7 @@ class UportalEnergyPtApiClient:
         return processed
 
     async def async_get_historical_data(self, counter, start_date=None):
+        """Complete historical data retrieval with guaranteed list return."""
         for attempt in range(2):
             try:
                 await self.async_refresh_token()
@@ -225,21 +226,20 @@ class UportalEnergyPtApiClient:
                     response.raise_for_status()
                     try:
                         data = await response.json()
-                    except aiohttp.ContentTypeError as e:
+                    except (aiohttp.ContentTypeError, JSONDecodeError) as e:
                         _LOGGER.error("JSON parse failed: %s", str(e))
                         return []
-                    return self._process_historical_data(data)
+                    return self._process_historical_data(data) or []
             except aiohttp.ClientResponseError as e:
                 if e.status == 401 and attempt == 0:
                     await self.async_refresh_token(force=True)
                     continue
-                else:
-                    _LOGGER.error("HTTP error %s for counter %s: %s", e.status, counter["numeroContador"], e.message)
-                    return []
+                _LOGGER.error("HTTP error %s for counter %s: %s", e.status, counter["numeroContador"], e.message)
+                return []
             except Exception as e:
                 _LOGGER.error("Historical fetch failed for %s: %s", counter["numeroContador"], str(e))
                 return []
-        return []
+        return []  # Final fallback
 
     def _calculate_smart_start_date(self, counter):
         try:
@@ -356,12 +356,13 @@ class UportalEnergyPtSensor(SensorEntity):
                     try:
                         # Explicit error handling around the API call
                         try:
-                            readings = await self.api.async_get_historical_data(
-                                counter,
-                                start_date=f"{year}-01-01"
-                            )
+                            # Force list conversion before processing
+                            readings = await self.api.async_get_historical_data(counter, f"{year}-01-01")
+                            readings = list(readings) if readings else []
+                            _LOGGER.debug("Fetched %d entries for %s year %s", len(readings), self.entity_id, year)
+                            break
                         except Exception as e:
-                            _LOGGER.error("API call failed: %s", str(e))
+                            _LOGGER.error("Temporary failure in %s: %s", year, str(e))
                             readings = []
                         readings = readings or []  # Ensure it's always a list
                         break
