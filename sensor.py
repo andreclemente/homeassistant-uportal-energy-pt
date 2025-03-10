@@ -21,13 +21,11 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     if not config_entry.data.get("counters"):
         _LOGGER.error("No counters configured in config entry")
         return True
-
     try:
         api = UportalEnergyPtApiClient(hass, config_entry)
         await api.async_initialize()
     except Exception as e:
         raise ConfigEntryNotReady(f"API initialization failed: {str(e)}") from e
-
     sensors = []
     for counter in config_entry.data["counters"]:
         product_type = counter["codigoProduto"]
@@ -42,15 +40,12 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 config_entry
             )
             sensors.append(sensor)
-    
     async_add_entities(sensors, True)
-    
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][config_entry.entry_id] = {
         "sensors": sensors,
         "api": api
     }
-
     if not hass.services.has_service(DOMAIN, "import_history"):
         async def import_history(call):
             _LOGGER.info("Initiating full historical data import")
@@ -58,16 +53,13 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             for entry_id in hass.data[DOMAIN]:
                 entry_data = hass.data[DOMAIN][entry_id]
                 all_sensors.extend(entry_data["sensors"])
-            
             for sensor in all_sensors:
                 try:
                     await sensor.async_import_historical_data()
                 except Exception as e:
                     _LOGGER.error("Failed to import history for %s: %s", 
                                 sensor.entity_id, str(e))
-        
         hass.services.async_register(DOMAIN, "import_history", import_history)
-
     return True  # Explicit return statement
 
 class UportalEnergyPtApiClient:
@@ -92,7 +84,6 @@ class UportalEnergyPtApiClient:
             if (force or 
                 not self.auth_data["token"] or 
                 current_time > self.auth_data["expiry"] - 300):
-                
                 _LOGGER.debug("Performing token refresh")
                 async with self.session.post(
                     f"{self.config_entry.data[CONF_BASE_URL]}login",
@@ -104,7 +95,6 @@ class UportalEnergyPtApiClient:
                 ) as response:
                     response.raise_for_status()
                     data = await response.json()
-                    
                     # Handle expiration date (supports Unix timestamp or ISO string)
                     expiry_value = data["token"]["expirationDate"]
                     if isinstance(expiry_value, (int, float)):
@@ -113,13 +103,11 @@ class UportalEnergyPtApiClient:
                     else:
                         # ISO string
                         expiry_date = parse_datetime(expiry_value)
-                    
                     self.auth_data.update({
                         "token": data["token"]["token"],
                         "expiry": expiry_date.timestamp()
                     })
                     _LOGGER.info("Token refresh successful")
-
         except aiohttp.ClientResponseError as e:
             _LOGGER.error("Authentication failed (HTTP %s): %s", e.status, e.message)
             self.auth_data["token"] = None
@@ -136,7 +124,6 @@ class UportalEnergyPtApiClient:
             # Validate authentication
             if not self.auth_data["token"]:
                 await self.async_refresh_token(force=True)
-
             params = {
                 "codigoMarca": counter_params["codigoMarca"],
                 "codigoProduto": counter_params["codigoProduto"],
@@ -145,7 +132,6 @@ class UportalEnergyPtApiClient:
                 "dataFim": dt_util.now().strftime("%Y-%m-%d"),
                 "dataInicio": (dt_util.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
             }
-            
             for attempt in range(2):
                 try:
                     async with self.session.get(
@@ -168,13 +154,11 @@ class UportalEnergyPtApiClient:
                         response.raise_for_status()
                         raw_data = await response.json()
                         processed = self._process_historical_data(raw_data)
-                        
                         valid_readings = [
                             r for r in processed 
                             if r["codFuncao"] == counter_params.get("target_function", "F1")
                             and isinstance(r.get("leitura"), (int, float))
                         ]
-                        
                         self.data[counter_id] = sorted(
                             valid_readings,
                             key=lambda x: x["entry_date"],
@@ -206,7 +190,6 @@ class UportalEnergyPtApiClient:
                     # ISO string with Zulu time
                     date_str = date_str.replace("Z", "+00:00")
                     entry_date = dt_util.parse_datetime(date_str)
-                
                 for reading in entry["leituras"]:
                     processed.append({
                         "codFuncao": reading["codFuncao"],
@@ -223,10 +206,8 @@ class UportalEnergyPtApiClient:
         for attempt in range(2):
             try:
                 await self.async_refresh_token()
-                
                 if not start_date:
                     start_date = self._calculate_smart_start_date(counter)
-                    
                 params = {
                     "codigoMarca": counter["codigoMarca"],
                     "codigoProduto": counter["codigoProduto"],
@@ -235,7 +216,6 @@ class UportalEnergyPtApiClient:
                     "dataFim": dt_util.now().strftime("%Y-%m-%d"),
                     "dataInicio": start_date,
                 }
-                
                 async with self.session.get(
                     f"{self.config_entry.data[CONF_BASE_URL]}History/getHistoricoLeiturasComunicadas",
                     headers={"X-Auth-Token": self.auth_data["token"]},
@@ -292,13 +272,12 @@ class UportalEnergyPtSensor(SensorEntity):
         self.descricao = descricao
         self.config_entry = config_entry
         self._attr_has_entity_name = True
-
         # Entity configuration
         self._attr_name = f"{PRODUCT_NAMES[produto]} {descricao}"
         # Enhanced ID sanitization
         safe_entry_id = sanitize_stat_id(config_entry.entry_id)
         self._attr_unique_id = f"uportal_{safe_entry_id}_{produto}_{numero}_{funcao}"
-        self._attr_statistic_id = self._attr_unique_id  # Ensure 1:1 mapping
+        self._attr_statistic_id = f"{DOMAIN}:{self._attr_unique_id}"  # Prefix with integration domain
         self._attr_native_unit_of_measurement = UNIT_MAP[produto]
         self._attr_state_class = "total_increasing"
         self._attr_device_class = "energy" if produto == "EB" else "gas" if produto == "GP" else "water"
@@ -314,10 +293,8 @@ class UportalEnergyPtSensor(SensorEntity):
                 "codigoProduto": self.produto,
                 "target_function": self.funcao
             })
-            
             readings = self.api.data.get(self.numero, [])
             valid_readings = [r for r in readings if r["codFuncao"] == self.funcao]
-            
             if valid_readings:
                 latest = valid_readings[0]
                 self._attr_native_value = latest["leitura"]
@@ -326,7 +303,6 @@ class UportalEnergyPtSensor(SensorEntity):
                 self._attr_available = False
                 self._attr_native_value = None
                 _LOGGER.debug("No valid readings for %s", self.entity_id)
-
         except Exception as e:
             self._attr_available = False
             self._attr_native_value = None
@@ -338,33 +314,27 @@ class UportalEnergyPtSensor(SensorEntity):
             # Validate counter configuration
             if not all([self.marca, self.numero, self.produto]):
                 raise ValueError("Invalid counter configuration")
-            
             from homeassistant.components.recorder import get_instance
             from homeassistant.components.recorder.statistics import async_add_external_statistics, statistics_during_period
-
             _LOGGER.info("Starting historical import for %s", self.entity_id)
-            
             # Use valid start date (January 1, 1970)
             start_time = datetime(1970, 1, 1, tzinfo=dt_util.UTC)
             end_time = dt_util.now()
-            
             existing_stats = await get_instance(self.hass).async_add_executor_job(
                 statistics_during_period,
                 self.hass,
                 start_time,
                 end_time,
-                [self.entity_id],
+                [self._attr_statistic_id],  # Use statistic_id instead of entity_id
                 "day",
                 None,
                 {"state", "sum"}
             )
-            
             # Handle invalid dates in existing stats
             existing_times = set()
-            for stat in existing_stats.get(self.entity_id, []):
+            for stat in existing_stats.get(self._attr_statistic_id, []):  # Use statistic_id here
                 start_value = stat.get("start")
                 parsed_time = None
-
                 try:
                     # Handle multiple data types
                     if isinstance(start_value, str):
@@ -376,22 +346,18 @@ class UportalEnergyPtSensor(SensorEntity):
                     else:
                         _LOGGER.warning("Unsupported start type: %s", type(start_value))
                         continue
-
                     if parsed_time:
                         existing_times.add(parsed_time.timestamp())
                 except Exception as e:
                     _LOGGER.warning("Skipped invalid date in stats: %s", str(e))
                     continue
-            
             counter = {
                 "codigoMarca": self.marca,
                 "codigoProduto": self.produto,
                 "numeroContador": self.numero
             }
-            
             new_data = []
             current_year = datetime.now().year
-            
             for year in range(2015, current_year + 1):
                 # Retry logic for historical fetch
                 for attempt in range(2):
@@ -407,7 +373,6 @@ class UportalEnergyPtSensor(SensorEntity):
                             continue
                         else:
                             raise
-                
                 year_data = [
                     {
                         "start": reading["entry_date"],
@@ -421,7 +386,6 @@ class UportalEnergyPtSensor(SensorEntity):
                 ]
                 new_data.extend(year_data)
                 await asyncio.sleep(1)
-        
             if new_data:
                 await async_add_external_statistics(
                     self.hass,
@@ -436,7 +400,6 @@ class UportalEnergyPtSensor(SensorEntity):
                 _LOGGER.info("Imported %d points for %s", len(new_data), self.entity_id)
             else:
                 _LOGGER.info("No new data for %s", self.entity_id)
-                
         except Exception as e:
             _LOGGER.error("Historical import failed for %s: %s (Parameters: marca=%s, numero=%s, produto=%s)",
                         self.entity_id, str(e), self.marca, self.numero, self.produto)
