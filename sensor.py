@@ -132,22 +132,21 @@ class UportalEnergyPtApiClient:
                         timeout=40
                     ) as response:
                         content_type = response.headers.get('Content-Type', '')
+                        response_text = await response.text()
+                        
                         if 'application/json' not in content_type:
-                            error_msg = f"Unexpected content type {content_type} for counter {counter_id}"
-                            _LOGGER.error("%s. Response: %s", error_msg, await response.text())
+                            _LOGGER.error("Unexpected content type %s. Full response: %s", 
+                                         content_type, response_text)
                             raise aiohttp.ClientResponseError(
                                 response.request_info,
                                 response.history,
-                                status=500,
-                                message=error_msg,
+                                status=response.status,
+                                message=f"Unexpected content type: {content_type}",
                                 headers=response.headers
                             )
+                        
                         response.raise_for_status()
-                        try:
-                            raw_data = await response.json()
-                        except aiohttp.ContentTypeError as e:
-                            _LOGGER.error("JSON parse error: %s", str(e))
-                            raw_data = []
+                        raw_data = await response.json()
                         processed = self._process_historical_data(raw_data)
                         valid_readings = [
                             r for r in processed 
@@ -165,11 +164,11 @@ class UportalEnergyPtApiClient:
                         _LOGGER.debug("Token expired, refreshing and retrying")
                         await self.async_refresh_token(force=True)
                         continue
-                    else:
-                        raise
+                    raise
         except Exception as e:
             _LOGGER.error("Data update failed for %s: %s", counter_id, str(e))
             self.data[counter_id] = []
+
 
     def _process_historical_data(self, data):
         processed = []
@@ -195,51 +194,47 @@ class UportalEnergyPtApiClient:
         return processed
 
     async def async_get_historical_data(self, counter, start_date=None):
-        """Complete historical data retrieval with guaranteed list return."""
-        for attempt in range(2):
-            try:
-                await self.async_refresh_token()
-                if not start_date:
-                    start_date = self._calculate_smart_start_date(counter)
-                params = {
-                    "codigoMarca": counter["codigoMarca"],
-                    "codigoProduto": counter["codigoProduto"],
-                    "numeroContador": counter["numeroContador"],
-                    "subscriptionId": self.config_entry.data["subscription_id"],
-                    "dataFim": dt_util.as_local(dt_util.now()).strftime("%Y-%m-%d"),
-                    "dataInicio": start_date,
-                }
-                async with self.session.get(
-                    f"{self.config_entry.data[CONF_BASE_URL]}History/getHistoricoLeiturasComunicadas",
-                    headers={"X-Auth-Token": self.auth_data["token"]},
-                    params=params,
-                    timeout=60
-                ) as response:
-                    if response.status in (404, 500):
-                        _LOGGER.warning("Server returned %s for %s", response.status, counter["numeroContador"])
-                        return []
-                    content_type = response.headers.get('Content-Type', '')
-                    if 'application/json' not in content_type:
-                        _LOGGER.error("Unexpected content type: %s. Response body: %s", 
-                                    content_type, await response.text())
-                        return []
-                    response.raise_for_status()
-                    try:
-                        data = await response.json()
-                    except (aiohttp.ContentTypeError, JSONDecodeError) as e:
-                        _LOGGER.error("JSON parse failed: %s", str(e))
-                        return []
-                    return self._process_historical_data(data) or []
-            except aiohttp.ClientResponseError as e:
-                if e.status == 401 and attempt == 0:
-                    await self.async_refresh_token(force=True)
-                    continue
-                _LOGGER.error("HTTP error %s for counter %s: %s", e.status, counter["numeroContador"], e.message)
-                return []
-            except Exception as e:
-                _LOGGER.error("Historical fetch failed for %s: %s", counter["numeroContador"], str(e))
-                return []
-        return []  # Final fallback
+        """Guaranteed to return list even with API errors"""
+        try:
+            await self.async_refresh_token()
+            if not start_date:
+                start_date = self._calculate_smart_start_date(counter)
+            params = {
+                "codigoMarca": counter["codigoMarca"],
+                "codigoProduto": counter["codigoProduto"],
+                "numeroContador": counter["numeroContador"],
+                "subscriptionId": self.config_entry.data["subscription_id"],
+                "dataFim": dt_util.as_local(dt_util.now()).strftime("%Y-%m-%d"),
+                "dataInicio": start_date,
+            }
+            async with self.session.get(
+                f"{self.config_entry.data[CONF_BASE_URL]}History/getHistoricoLeiturasComunicadas",
+                headers={"X-Auth-Token": self.auth_data["token"]},
+                params=params,
+                timeout=60
+            ) as response:
+                response_text = await response.text()
+                content_type = response.headers.get('Content-Type', '')
+                
+                if response.status in (404, 500):
+                    _LOGGER.warning("Server error %s: %s", response.status, response_text)
+                    return []
+                
+                if 'application/json' not in content_type:
+                    _LOGGER.error("Non-JSON response: %s", response_text)
+                    return []
+                
+                try:
+                    data = await response.json()
+                except Exception as e:
+                    _LOGGER.error("JSON parse error: %s", str(e))
+                    return []
+                
+                return self._process_historical_data(data) or []
+        except Exception as e:
+            _LOGGER.error("API failure: %s", str(e))
+            return []
+        return []
 
     def _calculate_smart_start_date(self, counter):
         try:
