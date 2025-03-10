@@ -126,7 +126,7 @@ class UportalEnergyPtApiClient:
             required_params = ["codigoMarca", "codigoProduto", "numeroContador"]
             if any(p not in counter_params for p in required_params):
                 raise ValueError("Missing required counter parameters")
-    
+
             params = {
                 "codigoMarca": counter_params["codigoMarca"],
                 "codigoProduto": counter_params["codigoProduto"],
@@ -139,7 +139,7 @@ class UportalEnergyPtApiClient:
             # Add request tracing for conflict errors
             request_id = f"{counter_id}-{int(dt_util.utcnow().timestamp())}"
             _LOGGER.debug("Making request %s with params: %s", request_id, params)
-    
+
             for attempt in range(3):  # Increased retry attempts
                 try:
                     async with self.session.get(
@@ -157,14 +157,14 @@ class UportalEnergyPtApiClient:
                             continue
                             
                         response.raise_for_status()
-    
+
                         # Attempt JSON parsing
                         try:
                             raw_data = await response.json()
                         except (JSONDecodeError, aiohttp.ContentTypeError):
                             _LOGGER.error("Failed to parse JSON response: %s", response_text)
                             raw_data = []
-    
+
                         processed = self._process_historical_data(raw_data)
                         valid_readings = [
                             r for r in processed 
@@ -177,7 +177,7 @@ class UportalEnergyPtApiClient:
                             reverse=True
                         )
                         break
-    
+
                 except aiohttp.ClientResponseError as e:
                     _LOGGER.warning("Request %s failed (attempt %d): %s", 
                                   request_id, attempt+1, str(e))
@@ -185,7 +185,7 @@ class UportalEnergyPtApiClient:
                         await self.async_refresh_token(force=True)
                     await asyncio.sleep(2)
                     continue
-    
+
         except Exception as e:
             _LOGGER.error("Data update failed for %s: %s", counter_id, str(e))
             self.data[counter_id] = []
@@ -270,6 +270,8 @@ class UportalEnergyPtApiClient:
 
 class UportalEnergyPtSensor(SensorEntity):
     def __init__(self, api, marca, numero, produto, funcao, descricao, config_entry):
+        if not api or not isinstance(api, UportalEnergyPtApiClient):
+            raise ValueError("Invalid API client provided to sensor")
         self.api = api
         self.marca = marca
         self.numero = numero
@@ -390,8 +392,11 @@ class UportalEnergyPtSensor(SensorEntity):
     
                         # Ensure headers use the refreshed token
                         headers = {"X-Auth-Token": self.api.auth_data["token"]}
-                        readings = await self.api.async_get_historical_data(counter, f"{year}-01-01",headers=headers)
-                        readings = list(readings) if readings else []
+                        readings = await self.api.async_get_historical_data(
+                            counter,
+                            f"{year}-01-01",
+                            headers=headers
+                        ) or []  # Ensure readings is always a list
                         _LOGGER.debug("Fetched %d entries for %s year %s", len(readings), self.entity_id, year)
                         break
                     except aiohttp.ClientResponseError as e:
