@@ -153,20 +153,18 @@ class UportalEnergyPtApiClient:
                         if response.status == 409:
                             _LOGGER.warning("Conflict error on request %s. Details: %s", 
                                           request_id, response_text)
-                            await asyncio.sleep(5)  # Add delay before retry
+                            await asyncio.sleep(5)
                             continue
                             
                         response.raise_for_status()
-                        # Rest of response handling remains same
- 
- 
-                        # Attempt JSON parsing regardless of content-type
+    
+                        # Attempt JSON parsing
                         try:
                             raw_data = await response.json()
                         except (JSONDecodeError, aiohttp.ContentTypeError):
                             _LOGGER.error("Failed to parse JSON response: %s", response_text)
                             raw_data = []
-
+    
                         processed = self._process_historical_data(raw_data)
                         valid_readings = [
                             r for r in processed 
@@ -179,16 +177,18 @@ class UportalEnergyPtApiClient:
                             reverse=True
                         )
                         break
-                        
+    
                 except aiohttp.ClientResponseError as e:
-                    # Enhanced error handling
                     _LOGGER.warning("Request %s failed (attempt %d): %s", 
                                   request_id, attempt+1, str(e))
                     if e.status == 401:
                         await self.async_refresh_token(force=True)
                     await asyncio.sleep(2)
                     continue
-
+    
+        except Exception as e:
+            _LOGGER.error("Data update failed for %s: %s", counter_id, str(e))
+            self.data[counter_id] = []
 
     def _process_historical_data(self, data):
         processed = []
