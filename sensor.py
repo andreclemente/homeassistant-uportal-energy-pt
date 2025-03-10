@@ -14,7 +14,8 @@ _LOGGER = logging.getLogger(__name__)
 
 # Sanitize statistic_id - remove all non-safe characters
 def sanitize_stat_id(input_str):
-    return re.sub(r'[^a-zA-Z0-9_]', '_', input_str)
+    # Convert to lowercase FIRST, then replace invalid characters
+    return re.sub(r'[^a-z0-9_]', '_', input_str.lower())
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
     """Set up integration entry point."""
