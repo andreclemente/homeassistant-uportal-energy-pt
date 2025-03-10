@@ -251,6 +251,7 @@ class UportalEnergyPtApiClient:
                 start_date = max(
                     install_date,
                     dt_util.now() - timedelta(days=365*10)
+                )
             return start_date.strftime("%Y-%m-%d")
         except Exception as e:
             _LOGGER.error("Invalid installation date: %s", str(e))
