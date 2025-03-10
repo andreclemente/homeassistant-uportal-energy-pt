@@ -5,6 +5,7 @@ import asyncio
 from datetime import datetime, timedelta
 from dateutil.parser import parse as parse_datetime
 from homeassistant.components.sensor import SensorEntity
+from homeassistant.components import recorder
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 from homeassistant.exceptions import ConfigEntryNotReady
@@ -329,7 +330,7 @@ class UportalEnergyPtSensor(SensorEntity):
             # Use valid start date (January 1, 1970)
             start_time = datetime(1970, 1, 1, tzinfo=dt_util.UTC)
             end_time = dt_util.now()
-            existing_stats = await get_instance(self.hass).async_add_executor_job(
+            existing_stats = await recorder_instance.async_add_executor_job(
                 statistics_during_period,
                 self.hass,
                 start_time,
@@ -339,6 +340,7 @@ class UportalEnergyPtSensor(SensorEntity):
                 None,
                 {"state", "sum"}
             )
+            
             # Handle invalid dates in existing stats
             existing_times = set()
             for stat in existing_stats.get(self._attr_statistic_id, []):  # <- Use statistic_id here
