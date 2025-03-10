@@ -427,18 +427,19 @@ class UportalEnergyPtSensor(SensorEntity):
                 await asyncio.sleep(3)  # Increased delay between years to avoid rate limiting
     
             if new_data:
-                await async_add_external_statistics(
-                    self.hass,
-                    {
-                        "source": DOMAIN,
-                        "name": self.name,
-                        "statistic_id": self._attr_statistic_id,
-                        "unit_of_measurement": self._attr_native_unit_of_measurement,
-                        "has_mean": False,  # Must be explicitly set
-                        "has_sum": True     # Must be explicitly set
-                    },
-                    new_data
+                # Use StatisticMetaData class for strict type validation
+                from homeassistant.components.recorder.statistics import StatisticMetaData
+                
+                metadata = StatisticMetaData(
+                    has_mean=False,
+                    has_sum=True,
+                    name=self.name,
+                    source=DOMAIN,
+                    statistic_id=self._attr_statistic_id,
+                    unit_of_measurement=self._attr_native_unit_of_measurement
                 )
+                
+                await async_add_external_statistics(self.hass, metadata, new_data)
                 _LOGGER.info("Imported %d points for %s", len(new_data), self.entity_id)
             else:
                 _LOGGER.info("No new data for %s", self.entity_id)
