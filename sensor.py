@@ -23,6 +23,8 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     try:
         api = UportalEnergyPtApiClient(hass, config_entry)
         await api.async_initialize()
+        if not api.auth_data["token"]:  # Add validation for successful auth
+            raise ConfigEntryNotReady("Failed to obtain initial authentication token")
     except Exception as e:
         raise ConfigEntryNotReady(f"API initialization failed: {str(e)}") from e
     sensors = []
@@ -225,7 +227,8 @@ class UportalEnergyPtApiClient:
                 try:
                     data = await response.json()
                 except (JSONDecodeError, aiohttp.ContentTypeError):
-                    _LOGGER.error("Non-JSON response: %s", response_text)
+                    # Log first 200 chars of unexpected response
+                    _LOGGER.error("Non-JSON response (truncated): %.200s", response_text)
                     return []
                 
                 return self._process_historical_data(data) or []
