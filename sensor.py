@@ -213,7 +213,7 @@ class UportalEnergyPtApiClient:
                 _LOGGER.warning("Invalid data entry: %s", str(e))
         return processed
 
-    async def async_get_historical_data(self, counter, start_date=None):
+    async def async_get_historical_data(self, counter, start_date=None, headers=None):
         """Guaranteed to return list even with API errors"""
         try:
             await self.async_refresh_token()
@@ -227,9 +227,11 @@ class UportalEnergyPtApiClient:
                 "dataFim": dt_util.as_local(dt_util.now()).strftime("%Y-%m-%d"),
                 "dataInicio": start_date,
             }
+            # Use provided headers or fallback to default
+            final_headers = headers or {"X-Auth-Token": self.auth_data["token"]}
             async with self.session.get(
                 f"{self.config_entry.data[CONF_BASE_URL]}History/getHistoricoLeiturasComunicadas",
-                headers={"X-Auth-Token": self.auth_data["token"]},
+                headers=final_headers,
                 params=params,
                 timeout=60
             ) as response:
@@ -242,7 +244,6 @@ class UportalEnergyPtApiClient:
                 try:
                     data = await response.json()
                 except (JSONDecodeError, aiohttp.ContentTypeError):
-                    # Log first 200 chars of unexpected response
                     _LOGGER.error("Non-JSON response (truncated): %.200s", response_text)
                     return []
                 
