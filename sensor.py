@@ -8,6 +8,7 @@ from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 from homeassistant.exceptions import ConfigEntryNotReady
+from json.decoder import JSONDecodeError
 from .const import DOMAIN, CONF_BASE_URL, UNIT_MAP, PRODUCT_NAMES
 
 _LOGGER = logging.getLogger(__name__)
@@ -52,6 +53,9 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 entry_data = hass.data[DOMAIN][entry_id]
                 all_sensors.extend(entry_data["sensors"])
             for sensor in all_sensors:
+                if sensor.api is None:  # Add safety check
+                    _LOGGER.error("Sensor API unavailable: %s", sensor.entity_id)
+                    continue
                 try:
                     await sensor.async_import_historical_data()
                 except Exception as e:
@@ -131,22 +135,22 @@ class UportalEnergyPtApiClient:
                         params=params,
                         timeout=40
                     ) as response:
-                        content_type = response.headers.get('Content-Type', '')
                         response_text = await response.text()
                         
-                        if 'application/json' not in content_type:
-                            _LOGGER.error("Unexpected content type %s. Full response: %s", 
-                                         content_type, response_text)
-                            raise aiohttp.ClientResponseError(
-                                response.request_info,
-                                response.history,
-                                status=response.status,
-                                message=f"Unexpected content type: {content_type}",
-                                headers=response.headers
-                            )
-                        
+                        # Handle possible 409 Conflict
+                        if response.status == 409:
+                            _LOGGER.warning("Conflict error: %s", response_text)
+                            continue
+                            
                         response.raise_for_status()
-                        raw_data = await response.json()
+                        
+                        # Attempt JSON parsing regardless of content-type
+                        try:
+                            raw_data = await response.json()
+                        except (JSONDecodeError, aiohttp.ContentTypeError):
+                            _LOGGER.error("Failed to parse JSON response: %s", response_text)
+                            raw_data = []
+                            
                         processed = self._process_historical_data(raw_data)
                         valid_readings = [
                             r for r in processed 
@@ -168,7 +172,6 @@ class UportalEnergyPtApiClient:
         except Exception as e:
             _LOGGER.error("Data update failed for %s: %s", counter_id, str(e))
             self.data[counter_id] = []
-
 
     def _process_historical_data(self, data):
         processed = []
@@ -214,27 +217,21 @@ class UportalEnergyPtApiClient:
                 timeout=60
             ) as response:
                 response_text = await response.text()
-                content_type = response.headers.get('Content-Type', '')
                 
-                if response.status in (404, 500):
+                if response.status in (404, 500, 409):
                     _LOGGER.warning("Server error %s: %s", response.status, response_text)
-                    return []
-                
-                if 'application/json' not in content_type:
-                    _LOGGER.error("Non-JSON response: %s", response_text)
                     return []
                 
                 try:
                     data = await response.json()
-                except Exception as e:
-                    _LOGGER.error("JSON parse error: %s", str(e))
+                except (JSONDecodeError, aiohttp.ContentTypeError):
+                    _LOGGER.error("Non-JSON response: %s", response_text)
                     return []
                 
                 return self._process_historical_data(data) or []
         except Exception as e:
             _LOGGER.error("API failure: %s", str(e))
             return []
-        return []
 
     def _calculate_smart_start_date(self, counter):
         try:
@@ -261,6 +258,7 @@ class UportalEnergyPtSensor(SensorEntity):
         self.funcao = funcao
         self.descricao = descricao
         self.config_entry = config_entry
+        self.hass = api.hass  # Critical fix: Add reference to hass
         self._attr_has_entity_name = True
         self._attr_name = f"{PRODUCT_NAMES[produto]} {descricao}"
         safe_entry_id = sanitize_stat_id(config_entry.entry_id)
@@ -302,6 +300,10 @@ class UportalEnergyPtSensor(SensorEntity):
                 async_add_external_statistics,
                 statistics_during_period,
             )
+    
+            if not self.api:  # Additional safety check
+                _LOGGER.error("API unavailable for %s", self.entity_id)
+                return
     
             recorder_instance = get_instance(self.hass)
             if not recorder_instance:
@@ -349,24 +351,22 @@ class UportalEnergyPtSensor(SensorEntity):
             for year in range(2015, current_year + 1):
                 for attempt in range(2):
                     try:
-                        # Explicit error handling around the API call
-                        try:
-                            # Force list conversion before processing
-                            readings = await self.api.async_get_historical_data(counter, f"{year}-01-01")
-                            readings = list(readings) if readings else []
-                            _LOGGER.debug("Fetched %d entries for %s year %s", len(readings), self.entity_id, year)
-                            break
-                        except Exception as e:
-                            _LOGGER.error("Temporary failure in %s: %s", year, str(e))
-                            readings = []
-                        readings = readings or []  # Ensure it's always a list
+                        readings = await self.api.async_get_historical_data(counter, f"{year}-01-01")
+                        readings = list(readings) if readings else []
+                        _LOGGER.debug("Fetched %d entries for %s year %s", len(readings), self.entity_id, year)
                         break
                     except aiohttp.ClientResponseError as e:
                         if e.status == 401 and attempt == 0:
                             await self.api.async_refresh_token(force=True)
                             continue
                         else:
-                            raise
+                            _LOGGER.error("API error for year %s: %s", year, str(e))
+                            readings = []
+                            break
+                    except Exception as e:
+                        _LOGGER.error("Temporary failure in %s: %s", year, str(e))
+                        readings = []
+                        break
                 year_data = [
                     {
                         "start": reading["entry_date"],
