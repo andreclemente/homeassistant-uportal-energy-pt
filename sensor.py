@@ -5,7 +5,6 @@ import asyncio
 from datetime import datetime, timedelta
 from dateutil.parser import parse as parse_datetime
 from homeassistant.components.sensor import SensorEntity
-from homeassistant.components import recorder
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 from homeassistant.exceptions import ConfigEntryNotReady
@@ -317,30 +316,33 @@ class UportalEnergyPtSensor(SensorEntity):
             return
         
         try:
+            """Import historical data with proper recorder checks."""
+            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.statistics import (
+                async_add_external_statistics,
+                statistics_during_period,
+            )
+    
+            # Check if recorder is available
             recorder_instance = get_instance(self.hass)
             if not recorder_instance:
-                raise RuntimeError("Recorder instance not available")
-        
-            # Validate counter configuration
-            if not all([self.marca, self.numero, self.produto]):
-                raise ValueError("Invalid counter configuration")
-            from homeassistant.components.recorder import get_instance
-            from homeassistant.components.recorder.statistics import async_add_external_statistics, statistics_during_period
-            _LOGGER.info("Starting historical import for %s", self.entity_id)
-            # Use valid start date (January 1, 1970)
+                _LOGGER.error("Recorder not available for %s", self.entity_id)
+                return
+    
             start_time = datetime(1970, 1, 1, tzinfo=dt_util.UTC)
             end_time = dt_util.now()
+    
             existing_stats = await recorder_instance.async_add_executor_job(
                 statistics_during_period,
                 self.hass,
                 start_time,
                 end_time,
-                [self._attr_statistic_id],  # <- Use statistic_id instead of entity_id
+                [self._attr_statistic_id],
                 "day",
                 None,
                 {"state", "sum"}
             )
-            
+                
             # Handle invalid dates in existing stats
             existing_times = set()
             for stat in existing_stats.get(self._attr_statistic_id, []):  # <- Use statistic_id here
