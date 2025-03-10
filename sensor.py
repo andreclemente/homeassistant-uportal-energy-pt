@@ -354,11 +354,16 @@ class UportalEnergyPtSensor(SensorEntity):
             for year in range(2015, current_year + 1):
                 for attempt in range(2):
                     try:
-                        readings = await self.api.async_get_historical_data(
-                            counter,
-                            start_date=f"{year}-01-01"
-                        )
-                        readings = readings or []
+                        # Explicit error handling around the API call
+                        try:
+                            readings = await self.api.async_get_historical_data(
+                                counter,
+                                start_date=f"{year}-01-01"
+                            )
+                        except Exception as e:
+                            _LOGGER.error("API call failed: %s", str(e))
+                            readings = []
+                        readings = readings or []  # Ensure it's always a list
                         break
                     except aiohttp.ClientResponseError as e:
                         if e.status == 401 and attempt == 0:
