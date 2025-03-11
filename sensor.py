@@ -87,30 +87,45 @@ class UportalEnergyPtApiClient:
                 not self.auth_data["token"] or 
                 current_time > self.auth_data["expiry"] - 300):
                 _LOGGER.debug("Performing token refresh")
-                async with self.session.post(
-                    f"{self.config_entry.data[CONF_BASE_URL]}login",
-                    json={
-                        "username": self.config_entry.data["username"],
-                        "password": self.config_entry.data["password"]
-                    },
-                    timeout=30
-                ) as response:
-                    response.raise_for_status()
-                    data = await response.json()
-                    expiry_value = data["token"]["expirationDate"]
-                    if isinstance(expiry_value, (int, float)):
-                        expiry_date = dt_util.utc_from_timestamp(expiry_value / 1000)
-                    else:
-                        expiry_date = parse_datetime(expiry_value)
-                    self.auth_data.update({
-                        "token": data["token"]["token"],
-                        "expiry": expiry_date.timestamp()
-                    })
-                    _LOGGER.info("Token refresh successful")
-        except aiohttp.ClientResponseError as e:
-            _LOGGER.error("Authentication failed (HTTP %s): %s", e.status, e.message)
-            self.auth_data["token"] = None
-            raise
+                for attempt in range(3):  # Retry on server errors
+                    try:
+                        async with self.session.post(
+                            f"{self.config_entry.data[CONF_BASE_URL]}login",
+                            json={
+                                "username": self.config_entry.data["username"],
+                                "password": self.config_entry.data["password"]
+                            },
+                            timeout=30
+                        ) as response:
+                            response.raise_for_status()
+                            data = await response.json()
+                            expiry_value = data["token"]["expirationDate"]
+                            try:
+                                if isinstance(expiry_value, (int, float)):
+                                    expiry_date = dt_util.utc_from_timestamp(expiry_value / 1000)
+                                else:
+                                    expiry_date = parse_datetime(expiry_value.replace("Z", "+00:00"))
+                            except Exception as e:
+                                _LOGGER.error("Invalid expiry date format: %s. Using 1 hour default.", str(e))
+                                expiry_date = dt_util.utcnow() + timedelta(hours=1)
+                            self.auth_data.update({
+                                "token": data["token"]["token"],
+                                "expiry": expiry_date.timestamp()
+                            })
+                            _LOGGER.info("Token refresh successful")
+                            break  # Exit retry loop on success
+                    except aiohttp.ClientResponseError as e:
+                        if e.status >= 500 and attempt < 2:
+                            await asyncio.sleep(5)
+                            continue
+                        _LOGGER.error("Authentication failed (HTTP %s): %s", e.status, e.message)
+                        self.auth_data["token"] = None
+                        raise
+                    except Exception as e:
+                        _LOGGER.error("Token refresh error (attempt %d): %s", attempt+1, str(e))
+                        if attempt == 2:
+                            raise
+                        await asyncio.sleep(3)
         except Exception as e:
             _LOGGER.error("Token refresh critical error: %s", str(e))
             self.auth_data["token"] = None
@@ -122,11 +137,17 @@ class UportalEnergyPtApiClient:
             if not self.auth_data["token"]:
                 await self.async_refresh_token(force=True)
             
-            # Validate request parameters
-            required_params = ["codigoMarca", "codigoProduto", "numeroContador"]
-            if any(p not in counter_params for p in required_params):
-                raise ValueError("Missing required counter parameters")
-
+            # Validate parameters to prevent None values
+            required_params = {
+                "codigoMarca": str,
+                "codigoProduto": str,
+                "numeroContador": str,
+                "subscription_id": str  # Ensure this exists in config_entry.data
+            }
+            for param, param_type in required_params.items():
+                if not isinstance(counter_params.get(param), param_type):
+                    raise ValueError(f"Invalid type for {param}. Expected {param_type}")
+    
             params = {
                 "codigoMarca": counter_params["codigoMarca"],
                 "codigoProduto": counter_params["codigoProduto"],
@@ -139,8 +160,8 @@ class UportalEnergyPtApiClient:
             # Add request tracing for conflict errors
             request_id = f"{counter_id}-{int(dt_util.utcnow().timestamp())}"
             _LOGGER.debug("Making request %s with params: %s", request_id, params)
-
-            for attempt in range(3):  # Increased retry attempts
+    
+            for attempt in range(5):  # Increased retry attempts
                 try:
                     async with self.session.get(
                         f"{self.config_entry.data[CONF_BASE_URL]}History/getHistoricoLeiturasComunicadas",
@@ -150,21 +171,27 @@ class UportalEnergyPtApiClient:
                     ) as response:
                         response_text = await response.text()
                         
+                        # Check for HTML responses
+                        if "text/html" in response.headers.get("Content-Type", ""):
+                            _LOGGER.error("Received HTML response instead of JSON. Token may be invalid.")
+                            await self.async_refresh_token(force=True)
+                            raise ValueError("Invalid API response format")
+                        
                         if response.status == 409:
                             _LOGGER.warning("Conflict error on request %s. Details: %s", 
                                           request_id, response_text)
-                            await asyncio.sleep(5)
+                            await asyncio.sleep(10)  # Longer delay for conflicts
                             continue
                             
                         response.raise_for_status()
-
+    
                         # Attempt JSON parsing
                         try:
                             raw_data = await response.json()
                         except (JSONDecodeError, aiohttp.ContentTypeError):
                             _LOGGER.error("Failed to parse JSON response: %s", response_text)
                             raw_data = []
-
+    
                         processed = self._process_historical_data(raw_data)
                         valid_readings = [
                             r for r in processed 
@@ -177,15 +204,15 @@ class UportalEnergyPtApiClient:
                             reverse=True
                         )
                         break
-
+    
                 except aiohttp.ClientResponseError as e:
                     _LOGGER.warning("Request %s failed (attempt %d): %s", 
                                   request_id, attempt+1, str(e))
                     if e.status == 401:
                         await self.async_refresh_token(force=True)
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(2 * (attempt + 1))  # Exponential backoff
                     continue
-
+    
         except Exception as e:
             _LOGGER.error("Data update failed for %s: %s", counter_id, str(e))
             self.data[counter_id] = []
@@ -219,16 +246,20 @@ class UportalEnergyPtApiClient:
             await self.async_refresh_token()
             if not start_date:
                 start_date = self._calculate_smart_start_date(counter)
+            
+            # Ensure all parameters are strings
             params = {
-                "codigoMarca": counter["codigoMarca"],
-                "codigoProduto": counter["codigoProduto"],
-                "numeroContador": counter["numeroContador"],
-                "subscriptionId": self.config_entry.data["subscription_id"],
+                "codigoMarca": str(counter["codigoMarca"]),
+                "codigoProduto": str(counter["codigoProduto"]),
+                "numeroContador": str(counter["numeroContador"]),
+                "subscriptionId": str(self.config_entry.data["subscription_id"]),
                 "dataFim": dt_util.as_local(dt_util.now()).strftime("%Y-%m-%d"),
                 "dataInicio": start_date,
             }
+            
             # Use provided headers or fallback to default
             final_headers = headers or {"X-Auth-Token": self.auth_data["token"]}
+            
             async with self.session.get(
                 f"{self.config_entry.data[CONF_BASE_URL]}History/getHistoricoLeiturasComunicadas",
                 headers=final_headers,
@@ -236,6 +267,12 @@ class UportalEnergyPtApiClient:
                 timeout=60
             ) as response:
                 response_text = await response.text()
+                
+                # Check for HTML responses
+                if "text/html" in response.headers.get("Content-Type", ""):
+                    _LOGGER.error("Received HTML response instead of JSON. Token may be invalid.")
+                    await self.async_refresh_token(force=True)
+                    raise ValueError("Invalid API response format")
                 
                 if response.status in (404, 500, 409):
                     _LOGGER.warning("Server error %s: %s", response.status, response_text)
