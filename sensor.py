@@ -142,17 +142,22 @@ class UportalEnergyPtApiClient:
                 "codigoMarca": str,
                 "codigoProduto": str,
                 "numeroContador": str,
-                "subscription_id": str  # Ensure this exists in config_entry.data
             }
             for param, param_type in required_params.items():
-                if not isinstance(counter_params.get(param), param_type):
-                    raise ValueError(f"Invalid type for {param}. Expected {param_type}")
+                value = counter_params.get(param)
+                if not isinstance(value, param_type):
+                    raise ValueError(f"Invalid type for {param}. Expected {param_type}, got {type(value)}")
+    
+            # Get subscription_id from config and enforce string type
+            subscription_id = str(self.config_entry.data.get("subscription_id", ""))
+            if not subscription_id:
+                raise ValueError("subscription_id is missing in configuration")
     
             params = {
                 "codigoMarca": counter_params["codigoMarca"],
                 "codigoProduto": counter_params["codigoProduto"],
                 "numeroContador": counter_id,
-                "subscriptionId": self.config_entry.data["subscription_id"],
+                "subscriptionId": subscription_id,  # Now explicitly a string
                 "dataFim": dt_util.as_local(dt_util.now()).strftime("%Y-%m-%d"),
                 "dataInicio": dt_util.as_local(dt_util.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
             }
